@@ -1,0 +1,9 @@
+include README.md
+include cli_anything/cad/README.md
+include cli_anything/cad/README_CN.md
+include cli_anything/cad/QA.md
+include cli_anything/cad/improve.md
+include cli_anything/cad/tests/TEST.md
+
+# Archive only: keep legacy implementation out of source distributions.
+prune cli_anything/cad_legacy
