@@ -199,7 +199,6 @@ class ConfigManager:
         self.cli_overrides = cli_overrides or {}
 
     def _defaults(self) -> dict[str, Any]:
-        setting_defaults = type(self.settings).model_fields
         return {
             "cad": {
                 "target_language": self.settings.DEFAULT_TARGET_LANGUAGE,
@@ -211,28 +210,28 @@ class ConfigManager:
             },
             "llm": {
                 "primary": {
-                    "provider": setting_defaults["TRANSLATION_PROVIDER"].default,
-                    "format": setting_defaults["LLM_API_FORMAT"].default,
-                    "base_url": setting_defaults["LLM_BASE_URL"].default,
-                    "api_key": setting_defaults["LLM_API_KEY"].default,
-                    "model": setting_defaults["LLM_MODEL"].default,
-                    "timeout_seconds": setting_defaults["LLM_TIMEOUT_SECONDS"].default,
-                    "temperature": setting_defaults["LLM_TEMPERATURE"].default,
-                    "max_tokens": setting_defaults["LLM_MAX_TOKENS"].default,
-                    "reasoning_enabled": setting_defaults["LLM_REASONING_ENABLED"].default,
+                    "provider": self.settings.TRANSLATION_PROVIDER,
+                    "format": self.settings.LLM_API_FORMAT,
+                    "base_url": self.settings.LLM_BASE_URL,
+                    "api_key": self.settings.LLM_API_KEY,
+                    "model": self.settings.LLM_MODEL,
+                    "timeout_seconds": self.settings.LLM_TIMEOUT_SECONDS,
+                    "temperature": self.settings.LLM_TEMPERATURE,
+                    "max_tokens": self.settings.LLM_MAX_TOKENS,
+                    "reasoning_enabled": self.settings.LLM_REASONING_ENABLED,
                 },
                 "fallback_models": [],
-                "system_prompt_mode": setting_defaults["LLM_SYSTEM_PROMPT_MODE"].default,
-                "custom_system_prompt": setting_defaults["LLM_CUSTOM_SYSTEM_PROMPT"].default,
-                "glossary_file": setting_defaults["LLM_GLOSSARY_FILE"].default,
-                "batch_size": setting_defaults["LLM_BATCH_SIZE"].default,
-                "batch_json": setting_defaults["LLM_ENABLE_BATCH_JSON"].default,
-                "parallel_count": setting_defaults["LLM_PARALLEL_COUNT"].default,
-                "retry_count": setting_defaults["LLM_RETRY_COUNT"].default,
-                "rpm": setting_defaults["LLM_RPM"].default,
-                "tpm": setting_defaults["LLM_TPM"].default,
-                "extra_body": setting_defaults["LLM_EXTRA_BODY"].default,
-                "use_system_proxy": setting_defaults["LLM_USE_SYSTEM_PROXY"].default,
+                "system_prompt_mode": self.settings.LLM_SYSTEM_PROMPT_MODE,
+                "custom_system_prompt": self.settings.LLM_CUSTOM_SYSTEM_PROMPT,
+                "glossary_file": self.settings.LLM_GLOSSARY_FILE,
+                "batch_size": self.settings.LLM_BATCH_SIZE,
+                "batch_json": self.settings.LLM_ENABLE_BATCH_JSON,
+                "parallel_count": self.settings.LLM_PARALLEL_COUNT,
+                "retry_count": self.settings.LLM_RETRY_COUNT,
+                "rpm": self.settings.LLM_RPM,
+                "tpm": self.settings.LLM_TPM,
+                "extra_body": self.settings.LLM_EXTRA_BODY,
+                "use_system_proxy": self.settings.LLM_USE_SYSTEM_PROXY,
             },
         }
 
@@ -267,6 +266,26 @@ class ConfigManager:
             ("CAD_TRANSLATION_FONT_SIZE_REDUCTION", "cad.font_size_reduction", int),
             ("CAD_TRANSLATION_DEFAULT_OUTPUT_DIR", "cad.default_output_dir", str),
             ("CAD_TRANSLATION_CONVERTER_BACKEND", "cad.converter_backend", str),
+            ("TRANSLATION_PROVIDER", "llm.primary.provider", str),
+            ("LLM_API_FORMAT", "llm.primary.format", str),
+            ("LLM_BASE_URL", "llm.primary.base_url", str),
+            ("LLM_API_KEY", "llm.primary.api_key", str),
+            ("LLM_MODEL", "llm.primary.model", str),
+            ("LLM_TIMEOUT_SECONDS", "llm.primary.timeout_seconds", int),
+            ("LLM_TEMPERATURE", "llm.primary.temperature", float),
+            ("LLM_MAX_TOKENS", "llm.primary.max_tokens", int),
+            ("LLM_REASONING_ENABLED", "llm.primary.reasoning_enabled", _parse_bool),
+            ("LLM_SYSTEM_PROMPT_MODE", "llm.system_prompt_mode", str),
+            ("LLM_CUSTOM_SYSTEM_PROMPT", "llm.custom_system_prompt", str),
+            ("LLM_GLOSSARY_FILE", "llm.glossary_file", str),
+            ("LLM_BATCH_SIZE", "llm.batch_size", int),
+            ("LLM_ENABLE_BATCH_JSON", "llm.batch_json", _parse_bool),
+            ("LLM_PARALLEL_COUNT", "llm.parallel_count", int),
+            ("LLM_RETRY_COUNT", "llm.retry_count", int),
+            ("LLM_RPM", "llm.rpm", int),
+            ("LLM_TPM", "llm.tpm", str),
+            ("LLM_EXTRA_BODY", "llm.extra_body", str),
+            ("LLM_USE_SYSTEM_PROXY", "llm.use_system_proxy", _parse_bool),
         ]
         merged: dict[str, Any] = {}
         for env_name, path, caster in mapping:

@@ -12,11 +12,15 @@ with (ROOT / "cli_anything" / "cad" / "README.md").open("r", encoding="utf-8") a
 
 install_requires = [
     "build>=1.2.0",
+    "setuptools>=68.0",
+    "wheel>=0.43.0",
     "click>=8.1.0",
     "prompt-toolkit>=3.0.0",
-    "fastapi>=0.115.0",
+    "fastapi>=0.115.0,<0.141.0",
+    "starlette>=0.40.0,<1.0.0",
     "uvicorn[standard]>=0.30.0",
     "python-multipart>=0.0.9",
+    "aiofiles>=24.1.0",
     "celery>=5.4.0",
     "redis>=5.0.0",
     "sqlalchemy>=2.0.0",
@@ -48,8 +52,9 @@ setup(
     install_requires=install_requires,
     extras_require={
         "dev": [
-            "pytest>=8.0.0",
-            "pytest-asyncio>=0.23.0",
+        "pytest>=8.0.0",
+        "pytest-asyncio>=0.23.0",
+        "httpx>=0.27.0,<0.29.0",
         ],
     },
     entry_points={

@@ -39,6 +39,10 @@ cd agent-harness
 pip install -e .
 ```
 
+The CLI calls the repository's `backend/` source. An editable install from this
+repository finds it automatically. If the CLI is installed elsewhere, set
+`CAD_TRANSLATION_BACKEND_DIR` to the backend directory that contains `app/`.
+
 Windows note:
 
 - editable install created the launcher under
@@ -173,6 +177,13 @@ Primary and fallback behavior:
 - before each translation request, the CLI/backend probes the primary model first
 - if the primary model is unavailable, missing a key, or returns retryable upstream failures such as `429` or `5xx`, the service automatically moves to the next fallback model
 - current fallback chain is visible in `cli-anything-cad config llm show`
+
+`.env` behavior:
+
+- `.env` supplies the default LLM provider, URL, model, and API key settings
+- `config llm init` writes runtime JSON settings, which take precedence over `.env`
+- when using a provider-specific key such as `MINIMAX_API_KEY`, also set
+  `TRANSLATION_PROVIDER=minimax` and its matching URL/model values
 
 Supported system prompt modes:
 

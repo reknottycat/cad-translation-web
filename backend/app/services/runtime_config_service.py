@@ -414,15 +414,14 @@ class RuntimeConfigService:
         if values.get("explicit_api_key"):
             # User explicitly sent api_key (including empty string to clear)
             primary_patch["api_key"] = values["api_key"]
-        elif old_provider != new_provider:
-            # Provider changed and user didn't explicitly send api_key.
-            # Try to fill from provider_api_keys for the new provider,
-            # otherwise clear primary.api_key to avoid stale key from old provider.
-            primary_patch["api_key"] = file_provider_api_keys.get(new_provider, "")
         elif values.get("api_key") and values.get("api_key_source") == "config":
-            # Key resolved from existing config (provider_api_keys), sync to primary
-            # so translation_service (which reads primary.api_key) can see it.
+            # Keep a resolved stored key when the form only changes non-secret
+            # settings (including provider). The user can clear it explicitly.
             primary_patch["api_key"] = values["api_key"]
+        elif old_provider != new_provider:
+            # No stored key was resolved for the selected provider. Prefer its
+            # provider-specific entry and otherwise leave the key unset.
+            primary_patch["api_key"] = file_provider_api_keys.get(new_provider, "")
         llm_patch: dict[str, Any] = {
             "primary": {
                 **primary_patch,

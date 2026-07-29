@@ -535,6 +535,49 @@ def test_config_manager_rejects_invalid_translation_mode(
         manager.get_effective_config()
 
 
+def test_env_file_llm_values_flow_into_effective_runtime_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    env_path = tmp_path / ".env"
+    runtime_config_path = tmp_path / "runtime_config.json"
+    _write_env_file(env_path, tmp_path / "runtime.db")
+    with env_path.open("a", encoding="utf-8") as env_file:
+        env_file.write(
+            "\n"
+            + "\n".join(
+                [
+                    "TRANSLATION_PROVIDER=minimax",
+                    "LLM_BASE_URL=https://api.minimax.chat/v1",
+                    "LLM_MODEL=MiniMax-M2.5",
+                    "MINIMAX_API_KEY=minimax-env-secret",
+                    "",
+                ]
+            )
+        )
+
+    if str(BACKEND_DIR) not in sys.path:
+        sys.path.insert(0, str(BACKEND_DIR))
+
+    monkeypatch.setenv("CAD_TRANSLATION_ENV_FILE", str(env_path))
+    monkeypatch.setenv("CAD_TRANSLATION_RUNTIME_CONFIG_FILE", str(runtime_config_path))
+    monkeypatch.chdir(tmp_path)
+    _clear_app_modules()
+
+    manager_module = importlib.import_module("app.services.config_manager")
+    runtime_module = importlib.import_module("app.services.runtime_config_service")
+
+    effective = manager_module.ConfigManager().get_effective_config()
+    summary = runtime_module.RuntimeConfigService().get_public_runtime_summary()
+
+    assert effective["llm"]["primary"]["provider"] == "minimax"
+    assert effective["llm"]["primary"]["base_url"] == "https://api.minimax.chat/v1"
+    assert effective["llm"]["primary"]["model"] == "MiniMax-M2.5"
+    assert summary["provider"] == "minimax"
+    assert summary["api_key_configured"] is True
+    assert summary["api_key_source"] == "settings"
+
+
 def test_config_manager_can_write_project_config(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -902,6 +945,7 @@ def test_llm_translate_text_applies_cad_prompt_and_glossary(
             }
 
     monkeypatch.setattr(service_module, "ConfigManager", DummyConfigManager)
+    monkeypatch.setattr(service, "_probe_candidate", lambda _: {"success": True})
 
     captured: dict[str, object] = {}
 
@@ -954,6 +998,7 @@ def test_llm_translate_text_supports_excel_glossary(
             }
 
     monkeypatch.setattr(service_module, "ConfigManager", DummyConfigManager)
+    monkeypatch.setattr(service, "_probe_candidate", lambda _: {"success": True})
 
     captured: dict[str, object] = {}
 
@@ -1032,9 +1077,10 @@ def test_llm_openai_request_includes_reasoning_when_enabled(
                         "reasoning_enabled": True,
                     }
                 }
-            }
+        }
 
     monkeypatch.setattr(service_module, "ConfigManager", DummyConfigManager)
+    monkeypatch.setattr(service, "_probe_candidate", lambda _: {"success": True})
 
     captured: dict[str, object] = {}
 
@@ -1085,6 +1131,7 @@ def test_llm_nvidia_request_uses_chat_template_kwargs_when_reasoning_enabled(
             }
 
     monkeypatch.setattr(service_module, "ConfigManager", DummyConfigManager)
+    monkeypatch.setattr(service, "_probe_candidate", lambda _: {"success": True})
 
     captured: dict[str, object] = {}
 

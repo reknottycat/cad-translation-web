@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from functools import lru_cache
 from pathlib import Path
@@ -10,7 +11,24 @@ def _repo_root() -> Path:
 
 
 def _backend_dir() -> Path:
-    return _repo_root() / "backend"
+    configured_path = os.environ.get("CAD_TRANSLATION_BACKEND_DIR", "").strip()
+    candidates: list[Path] = []
+    if configured_path:
+        candidates.append(Path(configured_path).expanduser())
+
+    candidates.append(_repo_root() / "backend")
+    for directory in (Path.cwd(), *Path.cwd().parents):
+        candidates.append(directory / "backend")
+
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if (resolved / "app").is_dir():
+            return resolved
+
+    raise RuntimeError(
+        "CAD backend was not found. Run the CLI from the repository root or set "
+        "CAD_TRANSLATION_BACKEND_DIR to the directory that contains app/."
+    )
 
 
 def ensure_backend_path() -> Path:
