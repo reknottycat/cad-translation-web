@@ -495,6 +495,10 @@ const TranslationWorkbenchPage: React.FC = () => {
   const [testingConnection, setTestingConnection] = useState(false)
   const [processing, setProcessing] = useState(false)
   const [stoppingTasks, setStoppingTasks] = useState(false)
+  const [savingCustomProvider, setSavingCustomProvider] = useState(false)
+  const [deletingProviderId, setDeletingProviderId] = useState<string | null>(null)
+  const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null)
+  const [downloadingPackage, setDownloadingPackage] = useState(false)
   const [configMessage, setConfigMessage] = useState<string>('')
   const [globalMessage, setGlobalMessage] = useState<string>('')
   const [isMainDropActive, setIsMainDropActive] = useState(false)
@@ -646,6 +650,12 @@ const TranslationWorkbenchPage: React.FC = () => {
     }, 3000)
     return () => window.clearInterval(timer)
   }, [])
+
+  useEffect(() => {
+    if (!globalMessage) return
+    const timer = window.setTimeout(() => setGlobalMessage(''), 6000)
+    return () => window.clearTimeout(timer)
+  }, [globalMessage])
 
   useEffect(() => {
     if (selectedBackendTaskId) {
@@ -877,6 +887,8 @@ const TranslationWorkbenchPage: React.FC = () => {
       MessagePlugin.error('服务商名称无效')
       return
     }
+    if (savingCustomProvider) return
+    setSavingCustomProvider(true)
 
     try {
       await apiService.translation.saveCustomProvider({
@@ -894,10 +906,14 @@ const TranslationWorkbenchPage: React.FC = () => {
       MessagePlugin.success(`已添加自定义服务商: ${name}`)
     } catch (error) {
       MessagePlugin.error(getApiErrorMessage(error, '添加自定义服务商失败'))
+    } finally {
+      setSavingCustomProvider(false)
     }
   }
 
   const deleteCustomProviderPreset = async (presetId: string) => {
+    if (deletingProviderId) return
+    setDeletingProviderId(presetId)
     try {
       await apiService.translation.deleteCustomProvider(presetId)
       const providersData: any = await apiService.translation.getProviders()
@@ -909,6 +925,8 @@ const TranslationWorkbenchPage: React.FC = () => {
       MessagePlugin.success('已删除自定义服务商')
     } catch (error) {
       MessagePlugin.error(getApiErrorMessage(error, '删除自定义服务商失败'))
+    } finally {
+      setDeletingProviderId(null)
     }
   }
 
@@ -1056,6 +1074,7 @@ const TranslationWorkbenchPage: React.FC = () => {
   }
 
   const refreshBackendTasks = async (silent = false) => {
+    if (!silent && backendTasksLoading) return
     if (!silent) setBackendTasksLoading(true)
     try {
       const response: any = await apiService.cad.listTasks()
@@ -1336,7 +1355,8 @@ const TranslationWorkbenchPage: React.FC = () => {
   }
 
   const downloadPackage = async (taskIds: string[]) => {
-    if (!taskIds.length) return
+    if (!taskIds.length || downloadingPackage) return
+    setDownloadingPackage(true)
     try {
       const blob = await apiService.cad.downloadPackage(taskIds)
       const blobUrl = window.URL.createObjectURL(blob)
@@ -1349,6 +1369,8 @@ const TranslationWorkbenchPage: React.FC = () => {
       window.URL.revokeObjectURL(blobUrl)
     } catch (error) {
       MessagePlugin.error(getApiErrorMessage(error, 'Package download failed'))
+    } finally {
+      setDownloadingPackage(false)
     }
   }
 
@@ -1367,12 +1389,16 @@ const TranslationWorkbenchPage: React.FC = () => {
   }
 
   const deleteBackendTask = async (taskId: string) => {
+    if (deletingTaskId) return
+    setDeletingTaskId(taskId)
     try {
       await apiService.cad.deleteTask(taskId)
       setGlobalMessage(`Task ${taskId} deleted`)
       await refreshBackendTasks()
     } catch (error) {
       MessagePlugin.error(getApiErrorMessage(error, 'Delete task failed'))
+    } finally {
+      setDeletingTaskId(null)
     }
   }
 
@@ -1643,10 +1669,11 @@ const TranslationWorkbenchPage: React.FC = () => {
                         <button
                           type="button"
                           className="small-link-button"
+                          disabled={deletingProviderId === preset.id}
                           onClick={() => void deleteCustomProviderPreset(preset.id)}
                           style={{ color: '#d32f2f', fontSize: 12 }}
                         >
-                          删除
+                          {deletingProviderId === preset.id ? '删除中...' : '删除'}
                         </button>
                       </div>
                     ))}
@@ -1687,9 +1714,10 @@ const TranslationWorkbenchPage: React.FC = () => {
                       type="button"
                       className="small-link-button"
                       style={{ marginTop: 10, fontSize: 13 }}
+                      disabled={savingCustomProvider}
                       onClick={() => void saveCustomProviderPreset()}
                     >
-                      + 添加为预设
+                      {savingCustomProvider ? '添加中...' : '+ 添加为预设'}
                     </button>
                   </>
                 ) : (
@@ -1902,11 +1930,25 @@ const TranslationWorkbenchPage: React.FC = () => {
               </label>
 
               <div className="action-row config-actions">
-                <Button type="button" theme="primary" size="small" loading={savingConfig} onClick={() => void saveRuntimeConfig()}>
-                  保存配置
+                <Button
+                  type="button"
+                  theme="primary"
+                  size="small"
+                  loading={savingConfig}
+                  disabled={savingConfig || testingConnection || loadingConfig}
+                  onClick={() => void saveRuntimeConfig()}
+                >
+                  {savingConfig ? '保存中...' : '保存配置'}
                 </Button>
-                <Button type="button" variant="outline" size="small" loading={testingConnection} onClick={() => void testRuntimeConnection()}>
-                  测试连接
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="small"
+                  loading={testingConnection}
+                  disabled={testingConnection || savingConfig || loadingConfig}
+                  onClick={() => void testRuntimeConnection()}
+                >
+                  {testingConnection ? '测试中...' : '测试连接'}
                 </Button>
               </div>
 
@@ -1955,7 +1997,12 @@ const TranslationWorkbenchPage: React.FC = () => {
                   <span className="btn-icon">⌕</span>
                   查看
                 </Button>
-                <button type="button" className="text-button danger" onClick={() => { setGlossaryFile(null); setGlossaryCleared(true) }}>
+                <button
+                  type="button"
+                  className="text-button danger"
+                  disabled={!glossaryFile && (!runtime.glossary_file || glossaryCleared)}
+                  onClick={() => { setGlossaryFile(null); setGlossaryCleared(true) }}
+                >
                   清空
                 </button>
               </div>
@@ -2052,6 +2099,7 @@ const TranslationWorkbenchPage: React.FC = () => {
                             <button
                               type="button"
                               className="small-link-button"
+                              disabled={!task.result?.downloadUrl && !task.result?.translatedCadUrl && !task.result?.excelUrl && !task.result?.taskId}
                               onClick={(event) => {
                                 event.stopPropagation()
                                 void downloadOutput(task)
@@ -2241,14 +2289,14 @@ const TranslationWorkbenchPage: React.FC = () => {
               <Button
                 theme="primary"
                 icon={<DownloadIcon />}
-                disabled={!packageTaskIds.length}
-                loading={Boolean(contentTask && contentTask.status === 'processing' && packageTaskIds.length)}
+                disabled={!packageTaskIds.length || downloadingPackage}
+                loading={downloadingPackage}
                 onClick={() => {
-                  if (!packageTaskIds.length) return
+                  if (!packageTaskIds.length || downloadingPackage) return
                   void downloadPackage(packageTaskIds)
                 }}
               >
-                {currentActionLabel}
+                {downloadingPackage ? '打包下载中...' : currentActionLabel}
               </Button>
             </div>
           </section>
@@ -2286,7 +2334,14 @@ const TranslationWorkbenchPage: React.FC = () => {
                   >
                     停止全部任务
                   </Button>
-                  <button type="button" className="icon-button" onClick={() => void refreshBackendTasks()} aria-label="刷新任务列表">
+                  <button
+                    type="button"
+                    className={`icon-button ${backendTasksLoading ? 'icon-button-loading' : ''}`}
+                    onClick={() => void refreshBackendTasks()}
+                    disabled={backendTasksLoading}
+                    aria-label="刷新任务列表"
+                    aria-busy={backendTasksLoading}
+                  >
                     <RefreshIcon />
                   </button>
                 </div>
@@ -2488,7 +2543,14 @@ const TranslationWorkbenchPage: React.FC = () => {
                   <h2>后端 CAD 任务</h2>
                 </div>
                 <div className="detail-actions-top">
-                  <button type="button" className="icon-button" onClick={() => void refreshBackendTasks()} aria-label="刷新后端任务">
+                  <button
+                    type="button"
+                    className={`icon-button ${backendTasksLoading ? 'icon-button-loading' : ''}`}
+                    onClick={() => void refreshBackendTasks()}
+                    disabled={backendTasksLoading}
+                    aria-label="刷新后端任务"
+                    aria-busy={backendTasksLoading}
+                  >
                     <RefreshIcon />
                   </button>
                 </div>
@@ -2543,12 +2605,13 @@ const TranslationWorkbenchPage: React.FC = () => {
                             <button
                               type="button"
                               className="text-button"
+                              disabled={processing}
                               onClick={(event) => {
                                 event.stopPropagation()
                                 void resumeBackendTask(task.task_id)
                               }}
                             >
-                              {status === 'partial' ? '继续翻译' : '继续'}
+                              {processing ? '恢复中...' : status === 'partial' ? '继续翻译' : '继续'}
                             </button>
                           ) : null}
                           <button
@@ -2565,12 +2628,13 @@ const TranslationWorkbenchPage: React.FC = () => {
                           <button
                             type="button"
                             className="text-button danger"
+                            disabled={deletingTaskId === task.task_id}
                             onClick={(event) => {
                               event.stopPropagation()
                               void deleteBackendTask(task.task_id)
                             }}
                           >
-                            删除
+                            {deletingTaskId === task.task_id ? '删除中...' : '删除'}
                           </button>
                         </div>
                       </div>
@@ -2630,6 +2694,8 @@ const TranslationWorkbenchPage: React.FC = () => {
                       <Button
                         size="small"
                         variant="outline"
+                        disabled={processing}
+                        loading={processing}
                         onClick={() => void resumeBackendTask(selectedBackendTask.task_id)}
                       >
                         {status === 'partial' ? '继续翻译' : '继续'}
@@ -2654,7 +2720,14 @@ const TranslationWorkbenchPage: React.FC = () => {
         </main>
       </div>
 
-      {globalMessage ? <div className="toast-note">{globalMessage}</div> : null}
+      {globalMessage ? (
+        <div className="toast-note" role="status">
+          <span>{globalMessage}</span>
+          <button type="button" className="toast-close" aria-label="关闭提示" onClick={() => setGlobalMessage('')}>
+            ×
+          </button>
+        </div>
+      ) : null}
     </div>
   )
 }
