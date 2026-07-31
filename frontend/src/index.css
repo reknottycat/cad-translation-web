@@ -190,6 +190,28 @@ svg {
   color: var(--text);
 }
 
+.icon-button-loading svg {
+  animation: icon-spin 0.9s linear infinite;
+}
+
+@keyframes icon-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+button:focus-visible,
+.upload-action:focus-visible {
+  outline: 2px solid #60a5fa;
+  outline-offset: 2px;
+}
+
+#main-upload-input:focus-visible + .drop-panel,
+#main-upload-input:focus-visible ~ .action-row .upload-action {
+  outline: 2px solid #60a5fa;
+  outline-offset: 2px;
+}
+
 .avatar-circle {
   width: 32px;
   height: 32px;
@@ -963,6 +985,24 @@ button:disabled {
   color: #e5e7eb;
   border: 1px solid rgba(148, 163, 184, 0.25);
   box-shadow: var(--shadow);
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.toast-close {
+  border: 0;
+  background: transparent;
+  color: #9ca3af;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.toast-close:hover {
+  color: #fff;
 }
 
 .field-select,
