@@ -179,6 +179,7 @@ output/
 命令行专用/node_modules/
 样图/
 electron_release/
+scale_release/
 scale_release_exe/
 release_exe/
 package-lock.json
