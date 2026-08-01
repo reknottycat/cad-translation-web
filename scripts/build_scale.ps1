@@ -6,6 +6,7 @@ Param(
 )
 
 $ErrorActionPreference = "Stop"
+Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $rootPath = (Resolve-Path $Root).Path
 $outDir = Join-Path $rootPath $OutDirName
@@ -234,7 +235,12 @@ if ($secretFiles) {
 Write-DeliveryLauncher -DestinationPath (Join-Path $outDir "start_delivery.bat")
 Write-DeliveryReadme -DestinationPath (Join-Path $outDir "README.md")
 
-Compress-Archive -Path (Join-Path $outDir "*") -DestinationPath $zipPath -Force
+[System.IO.Compression.ZipFile]::CreateFromDirectory(
+    $outDir,
+    $zipPath,
+    [System.IO.Compression.CompressionLevel]::Optimal,
+    $false
+)
 
 Write-Host "Scale release generated: $outDir"
 Write-Host "Zip package generated: $zipPath"
