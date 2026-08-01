@@ -202,6 +202,7 @@ Copy-DirectoryContents -SourceDir $backendSource -DestinationDir (Join-Path $out
     '(^|\\)temp(\\|$)',
     '(^|\\)\.env$',
     '(^|\\)\.env\.(?!example$)',
+    '(^|\\)runtime_config\.local\.json$',
     '\.db$',
     '(^|\\)README_MODERN\.md$',
     '(^|\\)test_.*\.py$',
@@ -222,6 +223,12 @@ foreach ($fileName in @("requirements.txt")) {
     if (Test-Path -LiteralPath $sourcePath -PathType Leaf) {
         Copy-Item -LiteralPath $sourcePath -Destination (Join-Path $outDir $fileName) -Force
     }
+}
+
+$secretFiles = Get-ChildItem -LiteralPath $outDir -Recurse -Force -File -ErrorAction Stop |
+    Where-Object { $_.Name -eq '.env' -or $_.Name -eq 'runtime_config.local.json' }
+if ($secretFiles) {
+    throw "Refusing to package secret files: $($secretFiles.FullName -join ', ')"
 }
 
 Write-DeliveryLauncher -DestinationPath (Join-Path $outDir "start_delivery.bat")
