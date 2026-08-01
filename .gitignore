@@ -121,6 +121,7 @@ backend/outputs/
 # Archived or superseded code snapshots
 .old/
 .backend_new/
+CLI-Anything/
 
 # Spyder project settings
 .spyderproject
@@ -184,3 +185,15 @@ scale_release_exe/
 release_exe/
 package-lock.json
 
+# Superseded/legacy components removed from release repo
+.trans_CAD_gui_V1.0/
+agent-harness/
+tests/
+docs/legacy/
+docs/plans/
+命令行专用/
+样图/
+v1.1-web-frontend.png
+extract_specific_dxf.py
+241217-11+小样图.dxf
+frontend/scripts/verify-progress-bug.ts

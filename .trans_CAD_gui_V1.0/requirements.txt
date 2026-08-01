@@ -1,7 +1,0 @@
-# CAD翻译工具依赖清单
-# 这些依赖项是运行GUI应用所必需的
-
-ezdxf==1.0.3
-pandas==2.0.3
-openpyxl==3.1.2
-customtkinter==5.2.2
