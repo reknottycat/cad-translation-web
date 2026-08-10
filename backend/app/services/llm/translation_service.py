@@ -562,29 +562,44 @@ class LLMTranslationService:
             last_error: Exception | None = None
             for encoding in ("utf-8", "utf-8-sig", "gb18030", "gbk"):
                 try:
-                    df = pd.read_csv(glossary_path, dtype=str, encoding=encoding).fillna("")
+                    # header=None 避免把无表头术语表的首行数据误当成列名而丢弃。
+                    # 读取后再统一按位置取前两列，并对真实表头做智能识别。
+                    df = pd.read_csv(glossary_path, dtype=str, encoding=encoding, header=None).fillna("")
                     break
                 except UnicodeDecodeError as exc:
                     last_error = exc
+                except (pd.errors.EmptyDataError, pd.errors.ParserError):
+                    # 空文件 / 无法解析：不视为硬错误，直接返回空术语表。
+                    return []
             if df is None:
                 if last_error is not None:
                     raise last_error
                 return []
         elif glossary_path.suffix.lower() in {".xlsx", ".xls"}:
-            df = pd.read_excel(glossary_path, dtype=str).fillna("")
+            df = pd.read_excel(glossary_path, dtype=str, header=None).fillna("")
         else:
             return []
 
-        if df.empty or len(df.columns) < 2:
+        if df.empty or df.shape[1] < 2:
             return []
 
-        first_col = df.columns[0]
-        second_col = df.columns[1]
+        # 智能识别表头：若首行两列都是表头关键字（原文/译文/source/target/术语等），则跳过首行。
+        header_keywords = {"原文", "译文", "术语", "中文", "英文", "source", "target", "term", "translation", "from", "to", "原文/术语", "英文/中文"}
+        first_row_src = str(df.iloc[0, 0]).strip()
+        first_row_tgt = str(df.iloc[0, 1]).strip()
+        first_row_is_header = bool(first_row_src) and bool(first_row_tgt) and (
+            first_row_src.casefold() in header_keywords
+            or first_row_tgt.casefold() in header_keywords
+            or first_row_src.casefold() in {"source", "term", "原文", "术语"}
+            or first_row_tgt.casefold() in {"target", "translation", "译文"}
+        )
+        start_row = 1 if first_row_is_header else 0
+
         records: List[tuple[str, str]] = []
         seen: set[tuple[str, str]] = set()
-        for _, row in df.iterrows():
-            source = str(row.get(first_col, "") or "").strip()
-            target = str(row.get(second_col, "") or "").strip()
+        for idx in range(start_row, len(df)):
+            source = str(df.iloc[idx, 0]).strip()
+            target = str(df.iloc[idx, 1]).strip()
             if not source or not target:
                 continue
             pair = (source, target)
