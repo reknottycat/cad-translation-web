@@ -333,12 +333,43 @@ def delete_custom_provider(provider_id: str) -> bool:
     return False
 
 
+class _TokenBucket:
+    """Minimal token bucket used for rpm/tpm rate limiting.
+
+    Callers must hold the service-level ``_rate_lock`` while mutating.
+    ``acquire(cost)`` returns the number of seconds the caller should sleep
+    to honor the configured rate (0 if no wait is needed).
+    """
+
+    def __init__(self, capacity: float, refill_per_sec: float):
+        self.capacity = max(0.0, float(capacity))
+        self.refill_per_sec = max(0.0, float(refill_per_sec))
+        self.tokens = self.capacity
+        self.last = time.time()
+
+    def acquire(self, cost: float) -> float:
+        now = time.time()
+        self.tokens = min(self.capacity, self.tokens + (now - self.last) * self.refill_per_sec)
+        self.last = now
+        if self.tokens >= cost:
+            self.tokens -= cost
+            return 0.0
+        deficit = cost - self.tokens
+        wait = deficit / self.refill_per_sec if self.refill_per_sec > 0 else 0.0
+        # Consume all available tokens; the caller sleeps for ``wait`` seconds.
+        self.tokens = 0.0
+        return wait
+
+
 class LLMTranslationService:
     def __init__(self):
         self.settings = get_settings()
         # Cache provider probes (reachability checks) so we don't spam /models.
         self._probe_cache: Dict[Tuple[str, str, str], Tuple[float, Dict[str, Any]]] = {}
         self._probe_ttl_seconds = 300
+        # Rate limiting (rpm/tpm) state, keyed by provider/base_url/model.
+        self._rate_lock = threading.Lock()
+        self._rate_buckets: Dict[Tuple[str, str, str, str], _TokenBucket] = {}
 
     @staticmethod
     def _is_translatable_text(text: str) -> bool:
@@ -416,6 +447,75 @@ class LLMTranslationService:
     def _should_retry_http_status(self, status_code: int) -> bool:
         return status_code == 429 or status_code >= 500
 
+    def _parse_extra_body(self, raw: str) -> Dict[str, Any]:
+        """Parse the user-supplied ``extra_body`` JSON string into a dict.
+
+        Invalid/empty JSON yields an empty dict so callers can merge it safely.
+        """
+        text = (raw or "").strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            logger.warning("llm_extra_body_invalid_json", raw=text[:300])
+            return {}
+        if not isinstance(parsed, dict):
+            logger.warning("llm_extra_body_not_object", raw=text[:300])
+            return {}
+        return parsed
+
+    def _proxy_for(self, cfg: Dict[str, Any]) -> Dict[str, str] | None:
+        """Return a ``proxies`` dict for requests, or None to use env proxies.
+
+        - ``use_system_proxy=True``  -> let requests honor HTTP(S)_PROXY env vars.
+        - ``use_system_proxy=False`` -> force a no-proxy request (bypass env proxies).
+        """
+        if bool(cfg.get("use_system_proxy", False)):
+            return None
+        return {"http": None, "https": None}
+
+    def _throttle(self, cfg: Dict[str, Any], cost: int = 1) -> None:
+        """Rate-limit a single request according to rpm/tpm settings.
+
+        ``rpm`` limits requests per minute; ``tpm`` limits tokens per minute.  Both
+        use a per-endpoint token bucket.  ``cost`` represents tokens when tpm is set.
+        """
+        rpm = int(cfg.get("rpm") or 0)
+        tpm = self._parse_tpm(cfg.get("tpm") or "")
+        if rpm <= 0 and tpm <= 0:
+            return
+        key = (cfg["provider"], cfg["base_url"], cfg["model"], f"r{rpm}t{tpm}")
+        with self._rate_lock:
+            bucket = self._rate_buckets.get(key)
+            if bucket is None:
+                # Requests-per-second refill; token capacity == one window's budget.
+                rps = rpm / 60.0 if rpm > 0 else 0.0
+                tps = tpm / 60.0 if tpm > 0 else 0.0
+                capacity = max(float(rpm or 0), float(tpm or 0))
+                refill = max(rps, tps)
+                bucket = _TokenBucket(capacity=capacity, refill_per_sec=refill)
+                self._rate_buckets[key] = bucket
+            wait = bucket.acquire(cost if tpm > 0 else 1)
+        if wait > 0:
+            logger.info("llm_rate_limited", provider=cfg["provider"], wait_seconds=round(wait, 2))
+            time.sleep(wait)
+
+    @staticmethod
+    def _parse_tpm(value: str) -> int:
+        """Parse a token-per-minute value; accepts plain numbers (e.g. "120k")."""
+        text = (value or "").strip().lower()
+        if not text:
+            return 0
+        multiplier = 1
+        if text.endswith("k"):
+            multiplier = 1000
+            text = text[:-1]
+        try:
+            return int(float(text) * multiplier)
+        except ValueError:
+            return 0
+
     def _extract_message_content(self, data: Dict[str, Any]) -> str:
         choices = data.get("choices") or []
         if not choices:
@@ -480,6 +580,14 @@ class LLMTranslationService:
             for entry in (file_runtime.get("fallback_models") or [])
             if isinstance(entry, dict)
         ]
+        # Propagate the global rate/proxy/extra settings so fallback candidates
+        # behave consistently with the primary config.
+        global_runtime = {
+            "retry_count", "rpm", "tpm", "extra_body", "use_system_proxy",
+        }
+        for fallback in fallback_models:
+            for key in global_runtime:
+                fallback.setdefault(key, file_runtime.get(key))
 
         primary.update(
             {
@@ -688,13 +796,21 @@ class LLMTranslationService:
             payload["chat_template_kwargs"] = {"thinking": True}
         elif cfg.get("reasoning_enabled"):
             payload["reasoning"] = {"enabled": True}
+        payload.update(self._parse_extra_body(cfg.get("extra_body", "")))
         headers = {
             "Authorization": f"Bearer {cfg['api_key']}",
             "Content-Type": "application/json",
         }
         if cfg["provider"] == "openrouter":
             headers["X-Title"] = self.settings.APP_NAME
-        response = requests.post(endpoint, headers=headers, json=payload, timeout=cfg["timeout"])
+        self._throttle(cfg, cost=int(cfg.get("max_tokens", 0)) or 1)
+        response = requests.post(
+            endpoint,
+            headers=headers,
+            json=payload,
+            timeout=cfg["timeout"],
+            proxies=self._proxy_for(cfg),
+        )
         if response.status_code != 200:
             retry_after = response.headers.get("retry-after") or response.headers.get("Retry-After")
             retry_hint = f" retry_after={retry_after}" if retry_after else ""
@@ -711,6 +827,15 @@ class LLMTranslationService:
             for message in messages
             if message.get("role") != "system"
         ]
+        body = {
+            "model": cfg["model"],
+            "system": "\n\n".join(system_messages).strip(),
+            "messages": user_messages,
+            "max_tokens": cfg["max_tokens"],
+            "temperature": cfg["temperature"],
+        }
+        body.update(self._parse_extra_body(cfg.get("extra_body", "")))
+        self._throttle(cfg, cost=int(cfg.get("max_tokens", 0)) or 1)
         response = requests.post(
             f"{cfg['base_url']}/messages",
             headers={
@@ -718,14 +843,9 @@ class LLMTranslationService:
                 "anthropic-version": "2023-06-01",
                 "content-type": "application/json",
             },
-            json={
-                "model": cfg["model"],
-                "system": "\n\n".join(system_messages).strip(),
-                "messages": user_messages,
-                "max_tokens": cfg["max_tokens"],
-                "temperature": cfg["temperature"],
-            },
+            json=body,
             timeout=cfg["timeout"],
+            proxies=self._proxy_for(cfg),
         )
         if response.status_code != 200:
             retry_after = response.headers.get("retry-after") or response.headers.get("Retry-After")
@@ -740,12 +860,14 @@ class LLMTranslationService:
 
     def _chat_google(self, cfg: Dict[str, Any], messages: List[Dict[str, str]]) -> str:
         prompt = "\n\n".join(f"{message.get('role', 'user')}: {message.get('content', '')}" for message in messages)
+        self._throttle(cfg, cost=int(cfg.get("max_tokens", 0)) or 1)
         response = requests.post(
             f"{cfg['base_url']}/models/{cfg['model']}:generateContent",
             params={"key": cfg["api_key"]},
             headers={"Content-Type": "application/json"},
             json={"contents": [{"parts": [{"text": prompt}]}]},
             timeout=cfg["timeout"],
+            proxies=self._proxy_for(cfg),
         )
         if response.status_code != 200:
             retry_after = response.headers.get("retry-after") or response.headers.get("Retry-After")
@@ -765,11 +887,15 @@ class LLMTranslationService:
         headers = {"Content-Type": "application/json"}
         if cfg["api_key"]:
             headers["Authorization"] = f"Bearer {cfg['api_key']}"
+        body = {"model": cfg["model"], "messages": messages, "stream": False}
+        body.update(self._parse_extra_body(cfg.get("extra_body", "")))
+        self._throttle(cfg, cost=1)
         response = requests.post(
             f"{cfg['base_url'].rstrip('/')}/api/chat",
             headers=headers,
-            json={"model": cfg["model"], "messages": messages, "stream": False},
+            json=body,
             timeout=cfg["timeout"],
+            proxies=self._proxy_for(cfg),
         )
         if response.status_code != 200:
             retry_after = response.headers.get("retry-after") or response.headers.get("Retry-After")
@@ -804,7 +930,7 @@ class LLMTranslationService:
                 if cfg["api_key"]:
                     headers["Authorization"] = f"Bearer {cfg['api_key']}"
                 endpoint = f"{cfg['base_url']}/models"
-                response = requests.get(endpoint, headers=headers, timeout=cfg["timeout"])
+                response = requests.get(endpoint, headers=headers, timeout=cfg["timeout"], proxies=self._proxy_for(cfg))
                 # Fallback to /chat/completions for providers that don't support /models (e.g. MiniMax)
                 if response.status_code == 404:
                     endpoint = f"{cfg['base_url']}/chat/completions"
@@ -818,6 +944,7 @@ class LLMTranslationService:
                                 "max_tokens": 1,
                             },
                             timeout=cfg["timeout"],
+                            proxies=self._proxy_for(cfg),
                         )
                     except Exception:
                         pass
@@ -838,7 +965,7 @@ class LLMTranslationService:
                     "Content-Type": "application/json",
                 }
                 endpoint = f"{cfg['base_url']}/models"
-                response = requests.get(endpoint, headers=headers, timeout=cfg["timeout"])
+                response = requests.get(endpoint, headers=headers, timeout=cfg["timeout"], proxies=self._proxy_for(cfg))
                 # Fallback to /messages for providers that don't support /models
                 if response.status_code == 404:
                     endpoint = f"{cfg['base_url']}/messages"
@@ -852,6 +979,7 @@ class LLMTranslationService:
                                 "max_tokens": 1,
                             },
                             timeout=cfg["timeout"],
+                            proxies=self._proxy_for(cfg),
                         )
                     except Exception:
                         pass
@@ -867,7 +995,7 @@ class LLMTranslationService:
                 }
             elif cfg["format"] == "google":
                 endpoint = f"{cfg['base_url']}/models"
-                response = requests.get(endpoint, params={"key": cfg["api_key"]}, timeout=cfg["timeout"])
+                response = requests.get(endpoint, params={"key": cfg["api_key"]}, timeout=cfg["timeout"], proxies=self._proxy_for(cfg))
                 # Fallback to direct model endpoint for providers that don't support /models
                 if response.status_code == 404:
                     endpoint = f"{cfg['base_url']}/models/{cfg['model']}:generateContent"
@@ -879,6 +1007,7 @@ class LLMTranslationService:
                                 "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
                             },
                             timeout=cfg["timeout"],
+                            proxies=self._proxy_for(cfg),
                         )
                     except Exception:
                         pass
@@ -896,7 +1025,12 @@ class LLMTranslationService:
                 headers = {"Content-Type": "application/json"}
                 if cfg["api_key"]:
                     headers["Authorization"] = f"Bearer {cfg['api_key']}"
-                response = requests.get(f"{cfg['base_url'].rstrip('/')}/api/tags", headers=headers, timeout=cfg["timeout"])
+                response = requests.get(
+                    f"{cfg['base_url'].rstrip('/')}/api/tags",
+                    headers=headers,
+                    timeout=cfg["timeout"],
+                    proxies=self._proxy_for(cfg),
+                )
                 result = {
                     "success": response.status_code == 200,
                     "reachable": response.status_code < 500,
@@ -973,12 +1107,15 @@ class LLMTranslationService:
                 logger.warning("llm_provider_probe_failed", provider=candidate["provider"], message=probe.get("message"))
                 continue
 
-            for attempt in range(1, 4):
+            # ``retry_count`` is the number of retries after the initial attempt,
+            # so total attempts = retry_count + 1 (matches the UI "重试次数" semantics).
+            retry_count = max(0, int(candidate.get("retry_count") or 0))
+            for attempt in range(1, retry_count + 2):
                 try:
                     return self._dispatch_chat(candidate, messages)
                 except (requests.RequestException, ValueError) as exc:
                     last_error = exc
-                    if attempt < 3 and self._is_retryable_chat_error(exc):
+                    if attempt < retry_count + 1 and self._is_retryable_chat_error(exc):
                         # 从错误信息中提取 status_code 和 Retry-After，用于更准确的退避
                         status_code = None
                         retry_after = None
