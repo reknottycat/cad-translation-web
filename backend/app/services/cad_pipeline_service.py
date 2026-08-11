@@ -4,6 +4,7 @@ import json
 import os
 import stat
 import shutil
+import threading
 import time
 import uuid
 import zipfile
@@ -36,6 +37,9 @@ class CADPipelineService:
         self._cancelled_task_ids: set[str] = set()
         # 使用模块化工作流管道处理新任务
         self._pipeline = get_pipeline()
+        # 每个 task_id 的元数据读-改-写锁，防止并发更新互相覆盖
+        self._task_meta_locks: dict[str, threading.Lock] = {}
+        self._task_meta_locks_guard = threading.Lock()
 
     def _tasks_root(self) -> Path:
         tasks_root = self.settings.get_output_path() / "cad_tasks"
@@ -272,8 +276,9 @@ class CADPipelineService:
         df = pd.read_excel(excel_path)
 
         values: list[str] = []
-        if "鍘熸枃" in df.columns:
-            values = df["鍘熸枃"].fillna("").astype(str).tolist()
+        # 使用真实表头名“原文”（曾误写成乱码“鍘熸枃”，导致永远匹配不到而回退到第 0 列）
+        if "原文" in df.columns:
+            values = df["原文"].fillna("").astype(str).tolist()
         elif len(df.columns) > 0:
             values = df.iloc[:, 0].fillna("").astype(str).tolist()
 
@@ -328,12 +333,23 @@ class CADPipelineService:
             encoding="utf-8",
         )
 
+    def _task_meta_lock(self, task_id: str) -> threading.Lock:
+        with self._task_meta_locks_guard:
+            lock = self._task_meta_locks.get(task_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._task_meta_locks[task_id] = lock
+            return lock
+
     def _update_task(self, task_id: str, **patch: Any) -> dict[str, Any]:
-        metadata = self._load_task(task_id)
-        metadata.update(patch)
-        metadata["last_activity_at"] = time.time()
-        self._save_task(task_id, metadata)
-        return metadata
+        # Serialize read-modify-write on the task metadata file so concurrent
+        # updates don't clobber each other (lost-update bug).
+        with self._task_meta_lock(task_id):
+            metadata = self._load_task(task_id)
+            metadata.update(patch)
+            metadata["last_activity_at"] = time.time()
+            self._save_task(task_id, metadata)
+            return metadata
 
     def _build_task_summary(self, metadata: dict[str, Any]) -> dict[str, Any]:
         task_id = metadata["task_id"]
@@ -667,7 +683,7 @@ class CADPipelineService:
 
         self._append_log(
             task_id,
-            f"寮€濮嬬炕璇? {len(records)} 鏉℃枃鏈? 鎵ц璺緞=DocuTranslate, 宸ヤ綔鐩綍={working_dir.name}",
+            f"开始翻译: {len(records)} 条文本, 执行路径=DocuTranslate, 工作目录={working_dir.name}",
         )
         self._update_task(
             task_id,
@@ -724,7 +740,7 @@ class CADPipelineService:
         )
         self._append_log(
             task_id,
-            f"DocuTranslate 缈昏瘧瀹屾垚: {successful} 鏉℃垚鍔? {failed_count} 鏉″け璐? artifacts={batch_result.translated_json_path.name}",
+            f"DocuTranslate 翻译完成: {successful} 条成功, {failed_count} 条失败, artifacts={batch_result.translated_json_path.name}",
         )
         return translations
 
@@ -957,15 +973,6 @@ class CADPipelineService:
                 # Need to re-translate if no checkpoint
                 if not translations:
                     self._append_log(task_id, "未找到翻译断点，重新执行翻译")
-                    # Re-read original texts from excel
-                    excel_path = self._task_excel_path(task_id, metadata)
-                    df = pd.read_excel(excel_path)
-                    original_texts = []
-                    if "原文" in df.columns:
-                        original_texts = [str(v).strip() for v in df["原文"].fillna("").astype(str).tolist() if str(v).strip()]
-                    elif len(df.columns) > 0:
-                        original_texts = [str(v).strip() for v in df.iloc[:, 0].fillna("").astype(str).tolist() if str(v).strip()]
-
                     text_entries = self._load_excel_text_entries(task_id, metadata)
                     original_texts = [entry["original"] for entry in text_entries]
                     record_ids = [entry["record_id"] for entry in text_entries]
@@ -1239,6 +1246,8 @@ class CADPipelineService:
         """Clear all tasks by removing the root tasks directory."""
         tasks_root = self._tasks_root()
         self._cancelled_task_ids.clear()
+        with self._task_meta_locks_guard:
+            self._task_meta_locks.clear()
         if tasks_root.exists():
             self._delete_tree(tasks_root)
         # Recreate the root directory to ensure it exists for future tasks
@@ -1249,6 +1258,8 @@ class CADPipelineService:
         if not task_dir.exists():
             raise FileNotFoundError(f"Task not found: {task_id}")
         self._cancelled_task_ids.discard(task_id)
+        with self._task_meta_locks_guard:
+            self._task_meta_locks.pop(task_id, None)
         self._delete_tree(task_dir)
 
     def stop_all_tasks(self) -> dict[str, Any]:
