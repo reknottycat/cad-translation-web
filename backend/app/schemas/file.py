@@ -61,20 +61,40 @@ class FileListResponse(BaseModel):
     @classmethod
     def from_orm(cls, obj):
         """从ORM对象创建响应模型"""
+        # ProjectFile ORM 没有 progress/error_message 字段，这里基于已有字段安全推导，
+        # 避免直接访问不存在属性时抛 AttributeError。
+        status = getattr(obj, 'status', 'uploaded')
+        total = getattr(obj, 'translated_texts_count', 0) or 0
+        extracted = getattr(obj, 'extracted_texts_count', 0) or 0
+        if status == 'failed':
+            progress = 0
+            error_message = 'Processing failed'
+        elif status in ('translated', 'done'):
+            progress = 100
+            error_message = None
+        elif status in ('extracted', 'extracting'):
+            progress = 60 if extracted else 40
+            error_message = None
+        elif status in ('converting', 'converted'):
+            progress = 30 if status == 'converted' else 15
+            error_message = None
+        else:
+            progress = total
+            error_message = None
         data = {
             'id': obj.id,
             'filename': obj.filename,
             'original_filename': obj.original_filename,
             'file_size': obj.file_size,
             'file_type': obj.file_type,
-            'status': obj.status,
-            'progress': obj.progress or 0,
-            'error_message': obj.error_message,
+            'status': status,
+            'progress': progress,
+            'error_message': error_message,
             'created_at': obj.created_at,
             'updated_at': obj.updated_at,
-            'has_converted': bool(obj.converted_path),
-            'has_excel': bool(obj.excel_path),
-            'has_translated': bool(obj.translated_path)
+            'has_converted': bool(getattr(obj, 'converted_path', None)),
+            'has_excel': bool(getattr(obj, 'excel_path', None)),
+            'has_translated': bool(getattr(obj, 'translated_path', None))
         }
         return cls(**data)
 

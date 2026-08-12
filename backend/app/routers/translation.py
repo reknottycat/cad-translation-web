@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -185,7 +186,11 @@ async def translate_excel_file_async(
         if not file.filename or not file.filename.lower().endswith((".xlsx", ".xls")):
             raise HTTPException(status_code=400, detail="only .xlsx/.xls is supported")
 
-        upload_path = settings.get_upload_path() / get_safe_filename(file.filename)
+        # 使用唯一文件名（UUID 前缀）避免同名文件相互覆盖，造成异步任务读取到错误文件。
+        safe_stem = Path(get_safe_filename(file.filename)).stem.replace(" ", "_")
+        suffix = Path(file.filename).suffix.lower()
+        unique_filename = f"{uuid.uuid4().hex}_{safe_stem}{suffix}"
+        upload_path = settings.get_upload_path() / unique_filename
         with open(upload_path, "wb") as buffer:
             buffer.write(await file.read())
 

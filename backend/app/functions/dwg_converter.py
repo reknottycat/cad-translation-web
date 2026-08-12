@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 import zipfile
@@ -23,6 +24,13 @@ import structlog
 
 
 logger = structlog.get_logger(__name__)
+
+# Serialize COM-based DWG conversions: multiple subprocesses concurrently
+# Dispatching the same AutoCAD/ZWCAD/GStarCAD COM instance causes races and
+# intermittent COM errors. A module-level semaphore keeps at most N conversions
+# running at once (default 1, configurable via env CAD_COM_CONCURRENCY).
+_com_concurrency = max(1, int(os.environ.get("CAD_COM_CONCURRENCY", "1")))
+_COM_SEMAPHORE = threading.BoundedSemaphore(_com_concurrency)
 
 
 class DWGConverter:
@@ -506,6 +514,9 @@ class DWGConverter:
             "--output",
             str(com_output_path),
         ]
+        # Acquire the global COM semaphore to avoid concurrent subprocesses racing
+        # on the same CAD COM instance. Released in finally to survive exceptions/timeouts.
+        _COM_SEMAPHORE.acquire()
         try:
             completed = subprocess.run(
                 command,
@@ -522,6 +533,8 @@ class DWGConverter:
             raise ValueError(
                 f"{class_name} timed out after {self._com_attempt_timeout()}s while opening or converting DWG."
             ) from exc
+        finally:
+            _COM_SEMAPHORE.release()
         if completed.returncode != 0:
             raise ValueError((completed.stderr or completed.stdout or "").strip() or f"exit {completed.returncode}")
         if not com_output_path.exists():

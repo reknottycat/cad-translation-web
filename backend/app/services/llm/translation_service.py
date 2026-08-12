@@ -367,6 +367,8 @@ class LLMTranslationService:
         # Cache provider probes (reachability checks) so we don't spam /models.
         self._probe_cache: Dict[Tuple[str, str, str], Tuple[float, Dict[str, Any]]] = {}
         self._probe_ttl_seconds = 300
+        # Track in-flight probes per key so concurrent threads share a single probe.
+        self._probe_inflight: Dict[Tuple[str, str, str], threading.Event] = {}
         # Rate limiting (rpm/tpm) state, keyed by provider/base_url/model.
         self._rate_lock = threading.Lock()
         self._rate_buckets: Dict[Tuple[str, str, str, str], _TokenBucket] = {}
@@ -928,6 +930,25 @@ class LLMTranslationService:
         if cached and (time.time() - cached[0]) < self._probe_ttl_seconds:
             return cached[1]
 
+        # Double-checked locking: only one thread performs the actual network probe
+        # per key; concurrent callers wait on the in-flight event and share its result.
+        with self._rate_lock:
+            cached = self._probe_cache.get(cache_key)
+            if cached and (time.time() - cached[0]) < self._probe_ttl_seconds:
+                return cached[1]
+            event = self._probe_inflight.get(cache_key)
+            if event is not None:
+                # Another thread is probing this key; wait for it to finish.
+                event.wait(timeout=float(cfg.get("timeout") or 30) + 5)
+                result = self._probe_cache.get(cache_key)
+                if result and (time.time() - result[0]) < self._probe_ttl_seconds:
+                    return result[1]
+                # The probing thread didn't finish in time; take over as the new owner.
+                self._probe_inflight[cache_key] = threading.Event()
+            else:
+                event = threading.Event()
+                self._probe_inflight[cache_key] = event
+
         try:
             if cfg["format"] not in {"ollama", "lmstudio"} and not cfg["api_key"]:
                 result = {
@@ -1078,9 +1099,20 @@ class LLMTranslationService:
                 "model": cfg["model"],
                 "message": str(exc),
             }
+        except Exception:
+            self._finish_probe(cache_key)
+            raise
 
         self._probe_cache[cache_key] = (time.time(), result)
+        self._finish_probe(cache_key)
         return result
+
+    def _finish_probe(self, cache_key: Tuple[str, str, str]) -> None:
+        """Release the in-flight probe marker for a key, waking any waiting threads."""
+        with self._rate_lock:
+            event = self._probe_inflight.pop(cache_key, None)
+        if event is not None:
+            event.set()
 
     def _is_retryable_chat_error(self, exc: Exception) -> bool:
         if isinstance(exc, requests.RequestException):
