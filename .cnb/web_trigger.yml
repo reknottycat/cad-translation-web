@@ -1,0 +1,15 @@
+# CNB Web 触发器 — 手动发布打包
+# 在 CNB Web 页面点击按钮即可手动触发发布打包流水线（无需打 Tag）。
+branch:
+  - reg: ^.*
+    buttons:
+      - name: 手动打包发布
+        event: web_trigger_pack
+        description: 构建前端并打包源码交付包（不发布 Release）
+        permissions:
+          roles: [master, developer]
+      - name: 发布 Release
+        event: web_trigger_release
+        description: 构建前端、打包交付包，并基于当前分支创建 Release
+        permissions:
+          roles: [master]
