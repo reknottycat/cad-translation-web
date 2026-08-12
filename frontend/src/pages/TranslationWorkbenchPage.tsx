@@ -218,12 +218,6 @@ const getBackendStageLabel = (stage?: string) => {
   }
 }
 
-const getOutputLabel = (options: { translatedCadUrl?: string; excelUrl?: string }) => {
-  if (options.translatedCadUrl) return '下载 CAD'
-  if (options.excelUrl) return '下载 Excel'
-  return '下载结果'
-}
-
 const unique = <T,>(items: T[]) => Array.from(new Set(items))
 
 const defaultLanguageOptions: LanguageOption[] = [
@@ -649,6 +643,9 @@ const TranslationWorkbenchPage: React.FC = () => {
       void refreshBackendTasks(true)
     }, 3000)
     return () => window.clearInterval(timer)
+    // refreshBackendTasks 为每次渲染重建的内联函数，轮询间隔固定为 3s，
+    // 仅需在挂载时建立一次；数据依赖已通过每次拉取覆盖，故不纳入依赖数组。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
@@ -1483,6 +1480,9 @@ const TranslationWorkbenchPage: React.FC = () => {
       return [outputBackendTask.task_id]
     }
     return []
+    // getQueueTaskBackendTask 为内联函数，其数据依赖（files / backendTasks）
+    // 均已包含在依赖数组中；将其加入数组会导致 memo 每次渲染都失效。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [files, outputBackendTask, backendTasks])
   const pendingLocalTasks = files.filter(
     (task) => task.source !== 'backend' && ['idle', 'queued', 'error', 'cancelled'].includes(task.status),
