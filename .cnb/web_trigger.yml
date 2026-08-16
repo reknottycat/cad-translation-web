@@ -13,3 +13,8 @@ branch:
         description: 构建前端、打包交付包，并基于当前分支创建 Release
         permissions:
           roles: [master]
+      - name: 生成 Windows EXE
+        event: web_trigger_exe
+        description: 在 Windows 自托管 Runner 上生成便携 EXE 交付包（需已接入 windows 节点）
+        permissions:
+          roles: [master]

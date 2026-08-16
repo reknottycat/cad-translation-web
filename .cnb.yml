@@ -129,6 +129,58 @@ main:
           options:
             description: "CAD Translation Web 自动发布 $RELEASE_VERSION。\n\n本包为跨平台源码交付包；Windows 最终交付包（scale_release/）请在本机运行 scripts/build_scale.ps1 生成。\n\n变更说明见 CHANGELOG（如存在）与 docs/modern/RELEASE_SCALE.md。"
 
+    # 打 Tag（v*）发版：Windows 自托管 Runner 生成便携 EXE 交付包
+    # 说明：仅在已接入 Windows 自托管 Runner（标签含 windows）时才会命中；
+    #       未接入时该流水线会因找不到节点而跳过/失败，可忽略或用 web_trigger_exe 手动触发。
+    - name: release-exe
+      runner:
+        namespace: group        # 使用根组织自托管构建节点
+        tags:
+          - windows             # 节点需声明 windows 标签（如 [windows, win11, msvc2022]）
+      env:
+        RELEASE_VERSION: $CNB_BRANCH
+        EXE_ARTIFACT: $CNB_BUILD_WORKSPACE/cad-translation-web-$CNB_BRANCH-windows-exe.zip
+      stages:
+        - name: prepare-env
+          # self-hosted Windows runner 上脚本默认走 PowerShell
+          script: |
+            $ErrorActionPreference = "Stop"
+            cmd /c ver
+            Write-Host "Python: $((python --version) 2>&1)"
+            Write-Host "Node  : $((node --version) 2>&1)"
+            Write-Host "npm   : $((npm --version) 2>&1)"
+            python -m pip install --upgrade pip
+            pip install -r requirements.txt pyinstaller
+        - name: build-frontend
+          script: |
+            Set-Location frontend
+            npm install
+            npm run build
+            Set-Location ..
+        - name: build-exe
+          script: |
+            powershell -ExecutionPolicy Bypass -File scripts/build_scale_exe.ps1 -Root (Get-Location).Path
+        - name: package-exe
+          script: |
+            $outDir = Join-Path (Get-Location).Path "scale_release_exe"
+            if (-not (Test-Path $outDir)) { throw "scale_release_exe not found" }
+            Compress-Archive -Path (Join-Path $outDir "*") -DestinationPath $env:EXE_ARTIFACT -Force
+            Get-Item $env:EXE_ARTIFACT | Select-Object Name, Length
+        - name: upload-asset
+          # 尽力将 EXE zip 挂到同一 Tag 的 Release 附件（由 release 流水线创建）；
+          # 上传失败不影响主流程（EXE 产物仍保留在构建产物中可直接下载）。
+          script: |
+            try {
+              powershell -ExecutionPolicy Bypass -File scripts/upload_release_asset.ps1 `
+                -Repo "$env:CNB_GROUP_SLUG/$env:CNB_REPO_NAME" `
+                -Tag "$env:RELEASE_VERSION" `
+                -File $env:EXE_ARTIFACT `
+                -AssetName (Split-Path $env:EXE_ARTIFACT -Leaf) `
+                -Token $env:CNB_TOKEN
+            } catch {
+              Write-Warning "upload-asset skipped: $_"
+            }
+
   # 手动触发：仅打包（不发布 Release）
   web_trigger_pack:
     - name: manual-pack
@@ -200,6 +252,40 @@ main:
           type: git:release
           options:
             description: "CAD Translation Web 手动发布 $RELEASE_VERSION。\n\n本包为跨平台源码交付包；Windows 最终交付包（scale_release/）请在本机运行 scripts/build_scale.ps1 生成。"
+
+  # 手动触发：Windows 自托管 Runner 生成便携 EXE（不发布 Release）
+  web_trigger_exe:
+    - name: manual-exe
+      runner:
+        namespace: group        # 使用根组织自托管构建节点
+        tags:
+          - windows             # 节点需声明 windows 标签
+      env:
+        RELEASE_VERSION: $CNB_BRANCH
+        EXE_ARTIFACT: $CNB_BUILD_WORKSPACE/cad-translation-web-$CNB_BRANCH-windows-exe.zip
+      stages:
+        - name: prepare-env
+          script: |
+            $ErrorActionPreference = "Stop"
+            Write-Host "Python: $((python --version) 2>&1)"
+            Write-Host "Node  : $((node --version) 2>&1)"
+            python -m pip install --upgrade pip
+            pip install -r requirements.txt pyinstaller
+        - name: build-frontend
+          script: |
+            Set-Location frontend
+            npm install
+            npm run build
+            Set-Location ..
+        - name: build-exe
+          script: |
+            powershell -ExecutionPolicy Bypass -File scripts/build_scale_exe.ps1 -Root (Get-Location).Path
+        - name: package-exe
+          script: |
+            $outDir = Join-Path (Get-Location).Path "scale_release_exe"
+            if (-not (Test-Path $outDir)) { throw "scale_release_exe not found" }
+            Compress-Archive -Path (Join-Path $outDir "*") -DestinationPath $env:EXE_ARTIFACT -Force
+            Get-Item $env:EXE_ARTIFACT | Select-Object Name, Length
 
   # 未知分支推送：基础语法校验
   push:

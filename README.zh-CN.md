@@ -163,16 +163,20 @@ powershell -ExecutionPolicy Bypass -File scripts/build_scale_exe_nuitka.ps1
 | `main` 推送 | `ci-backend` / `ci-frontend` | 后端编译检查 + 测试（有测试文件时）、前端 lint + build |
 | Pull Request | `pr-check-*` | 预合并代码同样做后端测试 + 前端 lint/build 校验 |
 | 打 `v*` Tag | `release` | 构建前端、打包跨平台源码交付包、自动发布 Release |
-| Web 手动触发 | `manual-pack` / `manual-release` | 页面点击按钮即可打包或打包+发版（`.cnb/web_trigger.yml`） |
+| 打 `v*` Tag | `release-exe` | 在 Windows 自托管 Runner 上生成便携 EXE 交付包并挂到 Release 附件 |
+| Web 手动触发 | `manual-pack` / `manual-release` / `manual-exe` | 页面点击按钮即可打包、发版或生成 EXE（`.cnb/web_trigger.yml`） |
 | 其它分支推送 | `ci-backend-syntax` | 后端语法校验 |
 
-> **说明**：Windows 最终交付包（`scale_release/`）依赖 CAD 软件 COM 自动化，仅能由本地 `scripts/build_scale.ps1` 生成；CNB 负责自动化校验与版本化制品分发，两者互补。
+> **说明**：
+> - Windows 完整交付包（`scale_release/`）依赖 CAD 软件 COM 自动化，仅能由本地 `scripts/build_scale.ps1` 生成；CNB 负责自动化校验与版本化制品分发，两者互补。
+> - 便携 EXE（`release-exe` / `manual-exe`）需要**已接入 Windows 自托管 Runner**（节点标签含 `windows`）。接入方法见 CNB 官方文档「云原生构建 → 构建节点」。未接入时该流水线不会运行，本地仍可用 `scripts/build_scale_exe.ps1` 生成 EXE。
+> - EXE 打包依赖 `release_exe/launcher.py`（PyInstaller 入口）与 `release_exe/pyinstaller_manifest.py`（依赖清单），两者已随仓库提供。
 
 使用方法：
 
 - **日常开发**：推送代码 / 提交 PR 即可获得自动校验结果。
-- **发版**：打一个形如 `v1.0.0` 的 Tag，流水线会自动构建、打包并发布 Release。
-- **手动打包**：在 CNB 仓库页面「流水线 → Web 触发」点击按钮手动打包或发版。
+- **发版**：打一个形如 `v1.0.0` 的 Tag，流水线会自动构建、打包源码交付包并发布 Release；若已接入 Windows 节点，同时生成便携 EXE 并挂到 Release。
+- **手动打包**：在 CNB 仓库页面「流水线 → Web 触发」点击按钮手动打包、发版或生成 EXE。
 
 ## 安全注意事项
 

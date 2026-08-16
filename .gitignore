@@ -177,13 +177,15 @@ output/
 .ruff_cache/
 .pytest_cache/
 %USERPROFILE%/
-ÃüÁîÐÐ×¨ÓÃ/node_modules/
-ÑùÍ¼/
+ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½×¨ï¿½ï¿½/node_modules/
+ï¿½ï¿½Í¼/
 electron_release/
 scale_release/
 scale_release.zip
 scale_release_exe/
-release_exe/
+release_exe/*.spec
+release_exe/build/
+release_exe/dist/
 package-lock.json
 
 # Superseded/legacy components removed from release repo
