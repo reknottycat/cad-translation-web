@@ -154,6 +154,26 @@ powershell -ExecutionPolicy Bypass -File scripts/build_scale_exe.ps1
 powershell -ExecutionPolicy Bypass -File scripts/build_scale_exe_nuitka.ps1
 ```
 
+## CNB 自动发布流程
+
+仓库内置 `.cnb.yml` 流水线配置，在 CNB 平台上自动执行校验与发版，与本地打包互补：
+
+| 触发时机 | 流水线 | 作用 |
+|----------|--------|------|
+| `main` 推送 | `ci-backend` / `ci-frontend` | 后端编译检查 + 测试（有测试文件时）、前端 lint + build |
+| Pull Request | `pr-check-*` | 预合并代码同样做后端测试 + 前端 lint/build 校验 |
+| 打 `v*` Tag | `release` | 构建前端、打包跨平台源码交付包、自动发布 Release |
+| Web 手动触发 | `manual-pack` / `manual-release` | 页面点击按钮即可打包或打包+发版（`.cnb/web_trigger.yml`） |
+| 其它分支推送 | `ci-backend-syntax` | 后端语法校验 |
+
+> **说明**：Windows 最终交付包（`scale_release/`）依赖 CAD 软件 COM 自动化，仅能由本地 `scripts/build_scale.ps1` 生成；CNB 负责自动化校验与版本化制品分发，两者互补。
+
+使用方法：
+
+- **日常开发**：推送代码 / 提交 PR 即可获得自动校验结果。
+- **发版**：打一个形如 `v1.0.0` 的 Tag，流水线会自动构建、打包并发布 Release。
+- **手动打包**：在 CNB 仓库页面「流水线 → Web 触发」点击按钮手动打包或发版。
+
 ## 安全注意事项
 
 1. Admin Guard 默认关闭。如需保护危险端点，在 `backend/.env` 中设置 `ENABLE_ADMIN_GUARD=true` 和 `ADMIN_API_TOKEN`。
