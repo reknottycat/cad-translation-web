@@ -23,6 +23,7 @@ ODA_FILE_CONVERTER_PATH=C:\\Program Files\\ODA\\ODAFileConverter\\ODAFileConvert
 ODA_OUTPUT_VERSION=ACAD2018
 ODA_OUTPUT_FORMAT=DXF
 CAD_CONVERTER_TIMEOUT=300
+CAD_COM_CONCURRENCY=1
 ```
 
 ## Supported Values
@@ -44,3 +45,4 @@ Frontend selector mapping:
 - `acadsharp` is now the primary open-code backend, but some DWG versions can still fail with `File version not recognized`.
 - When `acadsharp` fails and `ODA_FILE_CONVERTER_PATH` is configured, the backend falls back to ODA automatically.
 - If neither `acadsharp` nor `oda` can handle the file, the API returns a clear error instead of hanging in COM.
+- COM-based conversions (AutoCAD / GstarCAD / ZWCAD) are serialized by default via a semaphore. Set `CAD_COM_CONCURRENCY` to allow N concurrent COM subprocesses (default 1). This prevents race conditions on the same CAD COM instance.

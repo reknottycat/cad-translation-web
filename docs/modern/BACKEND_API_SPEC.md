@@ -174,6 +174,14 @@ Runtime fields currently exposed:
 - `max_tokens`
 - `batch_size`
 - `batch_json`
+- `parallel_count`
+- `retry_count`
+- `rpm`
+- `tpm`
+- `extra_body`
+- `use_system_proxy`
+- `fallback_count`
+- `fallback_models`
 - `masked_api_key`
 - `env_file`
 - `config_file`

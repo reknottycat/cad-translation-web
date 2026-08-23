@@ -31,9 +31,11 @@
 - **多厂商翻译**：内置 10+ LLM 厂商预设（OpenAI、DeepSeek、通义、Kimi、OpenRouter 等）
 - **自定义端点**：支持 OpenAI-compatible 自定义接口
 - **术语表**：支持 CSV/XLSX 术语表，翻译前自动替换
+- **旧格式术语表**：支持 .xls 格式（通过 xlrd 解析）
 - **翻译缓存**：相同文本不重复请求，降低成本
 - **智能过滤**：自动跳过纯数字、纯符号等无需翻译内容
 - **思维链过滤**：自动剥离模型 `<think>` 推理标签
+- **速率与请求控制**：RPM/TPM 限速、自定义 extra_body、系统代理开关、可配置重试次数
 - **回填模式**：替换原文、追加到下方、原文后换行
 - **工程化能力**：断点续传、部分完成状态、实时任务日志、模型记忆
 
@@ -112,7 +114,7 @@ cad-code/
 |------|------|
 | 后端 | Python 3.10+, FastAPI, Celery, Redis, SQLAlchemy 2.0, Alembic, Pydantic v2 |
 | 前端 | React 18, TypeScript, Vite 5, Tailwind CSS, TDesign React |
-| CAD | ezdxf, pandas, openpyxl, pywin32（Windows COM） |
+| CAD | ezdxf, pandas, openpyxl, xlrd, pywin32（Windows COM） |
 | LLM | OpenAI-compatible SDK，支持 10+ 厂商预设 |
 | 打包 | PowerShell, PyInstaller, Nuitka |
 

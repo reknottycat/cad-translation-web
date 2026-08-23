@@ -11,7 +11,9 @@ This repository contains the Web application: FastAPI backend + React frontend.
 - Batch translation through 10+ LLM providers (OpenAI, DeepSeek, Qwen, Kimi, OpenRouter, and more)
 - Custom OpenAI-compatible endpoints
 - CSV/XLSX glossary auto-replacement
+- Legacy .xls glossary support (xlrd)
 - Translation cache, smart filtering, and think-tag stripping
+- Rate limiting (RPM/TPM), custom request body (extra_body), proxy control, and configurable retries
 - Replace, append, and line-break backfill modes
 - Resume failed items, partial completion state, real-time task logs
 - Provider-aware model memory
@@ -91,7 +93,7 @@ cad-code/
 |-------|------------|
 | Backend | Python 3.10+, FastAPI, Celery, Redis, SQLAlchemy 2.0, Alembic, Pydantic v2 |
 | Frontend | React 18, TypeScript, Vite 5, Tailwind CSS, TDesign React |
-| CAD | ezdxf, pandas, openpyxl, pywin32 (Windows COM) |
+| CAD | ezdxf, pandas, openpyxl, xlrd, pywin32 (Windows COM) |
 | LLM | OpenAI-compatible SDK with 10+ provider presets |
 | Packaging | PowerShell, PyInstaller, Nuitka |
 

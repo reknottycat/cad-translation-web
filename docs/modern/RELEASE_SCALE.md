@@ -22,6 +22,7 @@
 - `frontend/node_modules`
 - `agent-harness`
 - 测试、缓存、数据库、`.env`
+- `runtime_config.local.json`（含 API Key 的运行时配置，构建脚本会拒绝打包）
 - 历史交付材料和开发期辅助文件
 
 ## 打包方式
