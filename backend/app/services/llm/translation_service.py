@@ -682,8 +682,14 @@ class LLMTranslationService:
                     # 空文件 / 无法解析：不视为硬错误，直接返回空术语表。
                     return []
             if df is None:
+                # 所有编码回退（utf-8/utf-8-sig/gb18030/gbk）都无法解码：
+                # 视为无法解析的术语表，返回空列表而非抛出异常，避免翻译流程崩溃。
                 if last_error is not None:
-                    raise last_error
+                    logger.warning(
+                        "glossary_undecodable_file",
+                        path=str(glossary_path),
+                        error=str(last_error),
+                    )
                 return []
         elif glossary_path.suffix.lower() in {".xlsx", ".xls"}:
             df = pd.read_excel(glossary_path, dtype=str, header=None).fillna("")
