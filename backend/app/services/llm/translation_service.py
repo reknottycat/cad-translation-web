@@ -480,25 +480,42 @@ class LLMTranslationService:
     def _throttle(self, cfg: Dict[str, Any], cost: int = 1) -> None:
         """Rate-limit a single request according to rpm/tpm settings.
 
-        ``rpm`` limits requests per minute; ``tpm`` limits tokens per minute.  Both
-        use a per-endpoint token bucket.  ``cost`` represents tokens when tpm is set.
+        ``rpm`` limits requests per minute; ``tpm`` limits tokens per minute.
+        Each dimension uses its own per-endpoint token bucket so that rpm and tpm
+        are enforced independently: when both are configured the request waits for
+        whichever bucket needs the longer back-off.  ``cost`` represents tokens for
+        the tpm bucket (``max_tokens`` for a translation request, ``1`` otherwise).
         """
         rpm = int(cfg.get("rpm") or 0)
         tpm = self._parse_tpm(cfg.get("tpm") or "")
         if rpm <= 0 and tpm <= 0:
             return
-        key = (cfg["provider"], cfg["base_url"], cfg["model"], f"r{rpm}t{tpm}")
+        endpoint = (cfg["provider"], cfg["base_url"], cfg["model"])
         with self._rate_lock:
-            bucket = self._rate_buckets.get(key)
-            if bucket is None:
-                # Requests-per-second refill; token capacity == one window's budget.
-                rps = rpm / 60.0 if rpm > 0 else 0.0
-                tps = tpm / 60.0 if tpm > 0 else 0.0
-                capacity = max(float(rpm or 0), float(tpm or 0))
-                refill = max(rps, tps)
-                bucket = _TokenBucket(capacity=capacity, refill_per_sec=refill)
-                self._rate_buckets[key] = bucket
-            wait = bucket.acquire(cost if tpm > 0 else 1)
+            waits = []
+            if rpm > 0:
+                rpm_key = (*endpoint, "rpm", rpm)
+                rpm_bucket = self._rate_buckets.get(rpm_key)
+                if rpm_bucket is None:
+                    # One token per request, capacity == one window's budget.
+                    rpm_bucket = _TokenBucket(
+                        capacity=float(rpm),
+                        refill_per_sec=rpm / 60.0,
+                    )
+                    self._rate_buckets[rpm_key] = rpm_bucket
+                waits.append(rpm_bucket.acquire(1))
+            if tpm > 0:
+                tpm_key = (*endpoint, "tpm", tpm)
+                tpm_bucket = self._rate_buckets.get(tpm_key)
+                if tpm_bucket is None:
+                    # Tokens-per-minute bucket; cost is the request's token estimate.
+                    tpm_bucket = _TokenBucket(
+                        capacity=float(tpm),
+                        refill_per_sec=tpm / 60.0,
+                    )
+                    self._rate_buckets[tpm_key] = tpm_bucket
+                waits.append(tpm_bucket.acquire(cost if cost > 0 else 1))
+            wait = max(waits) if waits else 0.0
         if wait > 0:
             logger.info("llm_rate_limited", provider=cfg["provider"], wait_seconds=round(wait, 2))
             time.sleep(wait)

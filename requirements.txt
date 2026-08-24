@@ -24,6 +24,8 @@ pandas>=2.2.0
 openpyxl>=3.1.0
 xlrd>=2.0.1  # 支持 .xls 术语表/Excel 旧格式解析
 requests>=2.31.0
+PyYAML>=6.0.0  # workflow 引擎解析 YAML frontmatter
+openai>=1.0.0  # scripts/image_gen.py 图像生成脚本
 
 # Configuration / validation / logging
 pydantic>=2.8.0
