@@ -247,7 +247,7 @@ python backend/tests/test_llm_concurrency.py
 - 自动生成的 API 文档：
   - Swagger UI：`/api/docs`
   - ReDoc：`/api/redoc`
-- 部分 CAD 和项目端点受 `require_admin_access` 保护（通过 `X-Admin-Token` 或 `Authorization: Bearer` 头部）。默认关闭（`ENABLE_ADMIN_GUARD=false`），内部部署时按需开启。
+- 部分 CAD 和项目端点受 `require_admin_access` 保护（通过 `X-Admin-Token` 或 `Authorization: Bearer` 头部）。Admin Guard **默认开启且 fail-closed**（`ENABLE_ADMIN_GUARD=true`）：配置了 `ADMIN_API_TOKEN` 时要求调用方携带 Token；开启但未配置 Token 时受保护端点统一返回 `503`，不会静默放行。仅隔离可信网络上的单用户部署才显式设 `ENABLE_ADMIN_GUARD=false`。
 
 ### 6.4 数据库与 ORM
 - 默认使用 **SQLite**（`sqlite:///./cad_translation.db`），可通过 `DATABASE_URL` 切换。
@@ -296,7 +296,7 @@ powershell -ExecutionPolicy Bypass -File scripts/build_scale_exe_nuitka.ps1
 
 ## 8. 安全注意事项
 
-1. **Admin Guard 默认关闭**：`ENABLE_ADMIN_GUARD=false`。内部使用时如需保护危险端点，必须在 `backend/.env` 中显式开启并设置 `ADMIN_API_TOKEN`。`JWT_SECRET_KEY` **不作为** admin 回退。
+1. **Admin Guard 默认开启且 fail-closed**：`ENABLE_ADMIN_GUARD=true`。本系统是单租户模型，无 per-user 账户；`ENABLE_ADMIN_GUARD` 只做「能否访问本实例」的粗粒度门控，不提供跨用户数据隔离。开启时须在 `backend/.env` 设置 `ADMIN_API_TOKEN`（通过 `X-Admin-Token` 或 `Authorization: Bearer` 提交）；若开启但 Token 为空，所有受保护端点返回 `503`，不存在静默放行路径。**仅**在隔离可信网络、受信单用户部署中显式设 `ENABLE_ADMIN_GUARD=false`。`JWT_SECRET_KEY` **不作为** admin 回退。
 2. **文件路径安全**：后端使用 `resolve_within_directory` 和 `get_safe_filename` 防止路径遍历。修改文件下载/上传逻辑时，必须保留这些校验。
 3. **API Key 管理**：运行时配置中的 API Key 在公共接口响应中会被掩码（mask）处理。打包时会被脱敏，但开发环境的 `.env` 和本地 JSON 配置文件仍需妥善保管，勿提交到版本控制。
 4. **Windows COM 安全**：COM 转换器（`autocad_converter.py`、`haochen_optimized_converter.py`）通过 `win32com.client` 启动 CAD 软件进程，需确保 CAD 软件已安装且版本兼容。

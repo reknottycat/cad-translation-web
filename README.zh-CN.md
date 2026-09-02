@@ -182,10 +182,26 @@ powershell -ExecutionPolicy Bypass -File scripts/build_scale_exe_nuitka.ps1
 
 ## 安全注意事项
 
-1. Admin Guard 默认关闭。如需保护危险端点，在 `backend/.env` 中设置 `ENABLE_ADMIN_GUARD=true` 和 `ADMIN_API_TOKEN`。
+1. Admin Guard **默认开启且 fail-closed**。当 `ENABLE_ADMIN_GUARD=true` 时，敏感的任务/项目/文件/配置/翻译端点都需要 `ADMIN_API_TOKEN`（通过 `X-Admin-Token` 头或 `Authorization: Bearer` 提交）。若 Guard 开启但 **未配置** Token，所有受保护路由返回 `503 Service Unavailable`，而不会静默放行。**仅**在受信网络的单用户部署中才显式设置 `ENABLE_ADMIN_GUARD=false` 开放访问。
 2. 打包脚本会自动对运行时配置中的 API Key 脱敏，但开发环境的 `.env` 仍需妥善保管。
 3. 后端使用 `resolve_within_directory` 和 `get_safe_filename` 防止路径遍历。
 4. 本地开发默认使用 HTTP；公网部署应在反向代理上配置 TLS。
+
+### 多用户并发与安全/授权模型
+
+系统支持内网部署下多操作者并发处理 CAD 任务，行为要点：
+
+- **任务隔离**：每个 CAD 任务有独立 UUID 任务目录（`outputs/cad_tasks/{task_id}/`），源文件、Excel、译文 CAD 与日志互不混用。
+- **跨进程文件锁**：任务元数据、翻译 checkpoint 与运行时配置通过原子写 + 稳定 `.lock` 侧车文件的跨进程文件锁保护，POSIX 用 `fcntl.flock`，Windows 用 `msvcrt.locking`。
+- **集中式 `task_id` 校验**：凡接受 `task_id` 的任务端点与服务方法，都会在其拼接进任意文件系统路径前校验其是否符合系统生成的形态（8 位小写十六进制，`uuid4().hex[:8]`）。含 `../`、`.`、路径分隔符或任何非十六进制文本的取值会被以 `400` 拒绝，调用方无法读取/下载/删除/回填任务树之外的路径。
+
+**单租户模型**：本系统是面向内部部署的**单租户** Web 应用，**没有 per-user 账户体系**，不提供同一实例上不同用户间的数据隔离；一台实例上的所有项目/任务/文件同属同一逻辑租户。
+
+- **`ENABLE_ADMIN_GUARD` 默认开启且 fail-closed**。在 `backend/.env` 设置 `ADMIN_API_TOKEN` 后，所有敏感任务/项目/文件/配置/翻译端点都要求 Token；调用方以 `X-Admin-Token: <token>` 或 `Authorization: Bearer <token>` 认证。
+- **fail-closed 行为**：若 `ENABLE_ADMIN_GUARD=true` 但 `ADMIN_API_TOKEN` 留空，所有受保护端点返回 `503 Service Unavailable`，避免「想开启保护却忘记配置凭证」导致敏感端点被静默暴露；不存在静默 fail-open 路径。
+- 仅显式设置 `ENABLE_ADMIN_GUARD=false` 才开放全部端点（受信网络的单用户部署），不推荐用于共享环境。
+- `task_id` / `project_id` / `file_id` 单独 **不是** 访问凭证——它只在调用方通过 admin guard 后标识某个资源。
+- 跨租户数据隔离需要引入账户体系（登录/会话/JWT、项目/任务/文件上的 per-user 归属字段、按用户过滤查询），**超出本仓库范围**。若需在同一主机服务多个相互独立的租户，应每个租户部署一个实例，或在前置部署反向代理 / SSO。
 
 ## 贡献指南
 
