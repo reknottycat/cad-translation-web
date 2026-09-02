@@ -198,9 +198,19 @@ The LLM/CAD runtime configuration (stored in `~/.config/cli-anything-cad/config.
   has a stable lifecycle lock file in `outputs/cad_task_lifecycle/{task_id}.lifecycle`
   (a sibling of `cad_tasks/`, never removed by delete/clear so lock identity —
   the inode — stays constant across processes). Writers (`_save_task` /
-  `_update_task` / `_append_log` / `_save_checkpoint`) and deleters
-  (`delete_task` / `clear_all_tasks`) hold this per-task lock for their whole
-  exists→lock→write/delete sequence, closing delete-vs-writer TOCTOU. A single
+  `_update_task` / `_append_log` / `_save_checkpoint`), the batch stopper
+  (`stop_all_tasks`) and deleters (`delete_task` / `clear_all_tasks`) hold this
+  per-task lock for their whole exists→lock→write/delete sequence, closing
+  delete-vs-writer TOCTOU. **Lock order is unified everywhere as
+  lifecycle-lock → task.json/task-file lock**: a writer or `stop_all_tasks`
+  acquires the per-task lifecycle lock *first* and only then takes the
+  task-file lock (nested via `_load_task`/`_save_task`/`_append_log`/
+  `_save_checkpoint`). `delete_task` / `clear_all_tasks` likewise hold the
+  lifecycle lock while reading or removing the task tree. This single ordering
+  (never task-file lock → lifecycle lock) is what prevents the cross-process
+  deadlock that would otherwise arise when two processes hold opposite locks
+  (one holds the task-file lock and wants the lifecycle lock while the other
+  holds the lifecycle lock and wants the task-file lock). A single
   **global** coordination lock
   (`outputs/cad_task_lifecycle/_task_create_or_clear.coord`) additionally
   serializes the *registration* critical region of `extract_upload`

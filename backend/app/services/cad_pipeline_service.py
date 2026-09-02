@@ -1836,19 +1836,48 @@ class CADPipelineService:
         self._clear_task_cancel(task_id)
 
     def stop_all_tasks(self) -> dict[str, Any]:
+        """Cancel every currently-active task (status in {processing, queued}).
+
+        Lock-order invariant: this method (like every writer and like
+        ``delete_task`` / ``clear_all_tasks``) acquires the **per-task
+        lifecycle lock FIRST**, then takes the task.json file lock *nested*
+        inside it via ``_load_task`` / ``_save_task``.  Historically this
+        method held the task.json file lock and then called ``_save_task``
+        (which acquires the lifecycle lock) — inverting the ordering to
+        file → lifecycle.  That created a cross-process deadlock with
+        ``delete_task`` / ``_update_task`` (which take lifecycle → file):
+        two processes could wait on each other forever:
+
+          * process A: holds file_lock(task.json), wants lifecycle lock
+          * process B: holds lifecycle lock, wants file_lock(task.json)
+
+        Holding the lifecycle lock first and performing the read-modify-write
+        only through ``_load_task`` / ``_save_task`` (whose file_lock on
+        task.json is re-entrant and strictly nested) restores the single
+        lifecycle → file_lock ordering and preserves cross-process
+        read-modify-write atomicity on task.json.  It also closes the window
+        where a concurrent delete could remove the task dir mid-write.
+        """
         cancelled_task_ids: list[str] = []
-        for metadata_path in self._tasks_root().glob("*/task.json"):
+        tasks_root = self._tasks_root()
+        if not tasks_root.exists():
+            return {"cancelled_task_ids": cancelled_task_ids, "cancelled_count": 0}
+        for metadata_path in tasks_root.glob("*/task.json"):
             task_id = metadata_path.parent.name
+            if not task_id:
+                continue
             meta_path = self._task_meta_path(task_id)
             try:
-                # Hold the task.json file_lock across the entire
-                # read-modify-write so another process/thread cannot race
-                # between the status check and the cancelled-state save.
-                # create_parents=False: never recreate a deleted task dir.
-                with file_lock(meta_path, create_parents=False):
-                    metadata = self._load_task(task_id)  # re-entrant lock
+                # Acquire the per-task lifecycle lock first; the task.json
+                # file lock is taken re-entrantly by _load_task/_save_task
+                # underneath it, matching the lifecycle → file ordering used
+                # by delete_task / clear_all_tasks and every writer.
+                with self._task_lifecycle_lock(task_id):
+                    if not meta_path.parent.exists():
+                        continue  # Task dir deleted concurrently.
+                    metadata = self._load_task(task_id)  # nested file_lock
                     status = str(metadata.get("status") or "").strip().lower()
-                    if not task_id or status not in {"processing", "queued"}:
+                    if status not in {"processing", "queued"}:
                         continue
                     # File-based cross-process cancellation marker.
                     self._mark_task_cancelled(task_id)
@@ -1856,7 +1885,7 @@ class CADPipelineService:
                     metadata["stage"] = "cancelled"
                     metadata["last_error"] = "Task cancelled by user."
                     metadata["last_activity_at"] = time.time()
-                    self._save_task(task_id, metadata)  # re-entrant lock
+                    self._save_task(task_id, metadata)  # nested lifecycle+file_lock
                     cancelled_task_ids.append(task_id)
             except (json.JSONDecodeError, OSError, FileNotFoundError) as exc:
                 logger.warning("stop_task_meta_skipped", task_id=task_id, error=str(exc))
