@@ -11,6 +11,7 @@ from typing import Any, Dict, List
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from app.utils.locking import file_lock
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -119,7 +120,13 @@ class Settings(BaseSettings):
     DEEPSEEK_MODEL: str = Field(default="deepseek-chat")
 
     JWT_SECRET_KEY: str = Field(default="change-this-in-production")
-    ENABLE_ADMIN_GUARD: bool = Field(default=False)
+    # Single-tenant safety boundary: admin guard is ON by default and
+    # **fail-closed**.  If ENABLE_ADMIN_GUARD=true but ADMIN_API_TOKEN is
+    # empty, every guarded endpoint returns HTTP 503 rather than opening
+    # access.  Operators who need protection MUST set ADMIN_API_TOKEN.
+    # Only set ENABLE_ADMIN_GUARD=false explicitly for a trusted
+    # single-user deployment on an isolated network.
+    ENABLE_ADMIN_GUARD: bool = Field(default=True)
     ADMIN_API_TOKEN: str = Field(default="")
 
     DEFAULT_SOURCE_LANGUAGE: str = Field(default="zh")
@@ -270,9 +277,10 @@ def load_runtime_config(path: Path | None = None) -> Dict[str, Any]:
     if not runtime_path.exists():
         return {}
 
-    try:
-        data = json.loads(runtime_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+    with file_lock(runtime_path):
+        try:
+            data = json.loads(runtime_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
 
     return data if isinstance(data, dict) else {}

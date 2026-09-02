@@ -9,6 +9,7 @@ from typing import Any
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from app.config import get_settings
+from app.utils.locking import atomic_write_json, file_lock
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -362,27 +363,25 @@ class ConfigManager:
         return current
 
     def update_global_config(self, patch: dict[str, Any]) -> dict[str, Any]:
-        current = self._load_file_with_includes(self.paths.global_config)
-        merged = _deep_merge(current, patch)
-        model = UnifiedConfig.model_validate(merged)
-        rendered = model.model_dump(exclude_none=True)
-        self.paths.global_config.parent.mkdir(parents=True, exist_ok=True)
-        self.paths.global_config.write_text(
-            f"{json.dumps(rendered, ensure_ascii=False, indent=2)}\n",
-            encoding="utf-8",
-        )
+        # Serialize config file read-modify-write across threads AND processes.
+        with file_lock(self.paths.global_config):
+            current = self._load_file_with_includes(self.paths.global_config)
+            merged = _deep_merge(current, patch)
+            model = UnifiedConfig.model_validate(merged)
+            rendered = model.model_dump(exclude_none=True)
+            self.paths.global_config.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(self.paths.global_config, rendered)
         return rendered
 
     def update_project_config(self, patch: dict[str, Any]) -> dict[str, Any]:
-        current = self._load_file_with_includes(self.paths.project_config)
-        merged = _deep_merge(current, patch)
-        model = UnifiedConfig.model_validate(merged)
-        rendered = model.model_dump(exclude_none=True)
-        self.paths.project_config.parent.mkdir(parents=True, exist_ok=True)
-        self.paths.project_config.write_text(
-            f"{json.dumps(rendered, ensure_ascii=False, indent=2)}\n",
-            encoding="utf-8",
-        )
+        # Serialize config file read-modify-write across threads AND processes.
+        with file_lock(self.paths.project_config):
+            current = self._load_file_with_includes(self.paths.project_config)
+            merged = _deep_merge(current, patch)
+            model = UnifiedConfig.model_validate(merged)
+            rendered = model.model_dump(exclude_none=True)
+            self.paths.project_config.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(self.paths.project_config, rendered)
         return rendered
 
     def set_global_path_value(self, path: str, value: Any) -> dict[str, Any]:

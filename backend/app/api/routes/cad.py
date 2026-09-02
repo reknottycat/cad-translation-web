@@ -9,7 +9,7 @@ from starlette.concurrency import run_in_threadpool
 from app.config import get_settings
 from app.services.alibaba_ai_translation_service import alibaba_ai_translation_service
 from app.services.runtime_config_service import runtime_config_service
-from app.services.cad_pipeline_service import TaskCancelledError, cad_pipeline_service
+from app.services.cad_pipeline_service import TaskCancelledError, cad_pipeline_service, validate_task_id
 from app.utils.file_utils import validate_file
 from app.security import require_admin_access
 
@@ -23,7 +23,7 @@ async def _validate_uploaded_cad_file(file: UploadFile) -> None:
         raise HTTPException(status_code=400, detail=validation.get("error", "Invalid file"))
 
 
-@router.get("/defaults")
+@router.get("/defaults", dependencies=[Depends(require_admin_access)])
 async def get_cad_defaults():
     try:
         return JSONResponse({"success": True, "data": runtime_config_service.get_cad_defaults_summary()})
@@ -42,7 +42,7 @@ async def save_cad_defaults(request: dict):
         raise HTTPException(status_code=500, detail=f"Save CAD defaults failed: {exc}") from exc
 
 
-@router.post("/extract")
+@router.post("/extract", dependencies=[Depends(require_admin_access)])
 async def extract_cad_text(
     file: UploadFile = File(...),
     converter_backend: str = Form(default="auto"),
@@ -76,7 +76,7 @@ async def extract_cad_text(
         raise HTTPException(status_code=500, detail=f"CAD extract failed: {exc}") from exc
 
 
-@router.post("/apply-translation")
+@router.post("/apply-translation", dependencies=[Depends(require_admin_access)])
 async def apply_translation_to_cad(request: dict):
     """
     将用户提供的翻译应用到 CAD 文件。
@@ -94,8 +94,10 @@ async def apply_translation_to_cad(request: dict):
     font_name = request.get("font_name") or None
     font_size_reduction = int(request.get("font_size_reduction", 2))
 
-    if not task_id:
-        raise HTTPException(status_code=400, detail="task_id is required")
+    try:
+        task_id = validate_task_id(task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if translation_mode not in ("replace", "add"):
         raise HTTPException(status_code=400, detail="translation_mode must be 'replace' or 'add'")
 
@@ -113,11 +115,13 @@ async def apply_translation_to_cad(request: dict):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TaskCancelledError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Apply translation failed: {exc}") from exc
 
 
-@router.post("/upload")
+@router.post("/upload", dependencies=[Depends(require_admin_access)])
 async def upload_cad_file(
     file: UploadFile = File(...),
     target_language: str = Form(default="en"),
@@ -162,9 +166,10 @@ async def upload_cad_file(
         raise HTTPException(status_code=500, detail=f"CAD upload failed: {exc}") from exc
 
 
-@router.get("/download/{task_id}/{file_type}")
+@router.get("/download/{task_id}/{file_type}", dependencies=[Depends(require_admin_access)])
 async def download_file(task_id: str, file_type: str):
     try:
+        task_id = validate_task_id(task_id)
         file_path, media_type = cad_pipeline_service.resolve_download(task_id, file_type)
         return FileResponse(path=str(file_path), media_type=media_type, filename=file_path.name)
     except FileNotFoundError as exc:
@@ -179,6 +184,8 @@ async def download_file(task_id: str, file_type: str):
 async def download_package(request: dict):
     task_ids = request.get("task_ids", [])
     try:
+        for _tid in (task_ids or []):
+            validate_task_id(_tid)
         file_path, media_type = cad_pipeline_service.build_download_package(task_ids)
         return FileResponse(path=str(file_path), media_type=media_type, filename=file_path.name)
     except FileNotFoundError as exc:
@@ -189,7 +196,7 @@ async def download_package(request: dict):
         raise HTTPException(status_code=500, detail=f"Package download failed: {exc}") from exc
 
 
-@router.get("/tasks")
+@router.get("/tasks", dependencies=[Depends(require_admin_access)])
 async def list_tasks():
     try:
         return JSONResponse({"success": True, "data": cad_pipeline_service.list_tasks()})
@@ -215,10 +222,11 @@ async def clear_all_tasks():
         raise HTTPException(status_code=500, detail=f"Clear tasks failed: {exc}") from exc
 
 
-@router.post("/tasks/{task_id}/resume")
+@router.post("/tasks/{task_id}/resume", dependencies=[Depends(require_admin_access)])
 async def resume_task(task_id: str, request: dict):
     """Resume an interrupted or failed CAD task from its last checkpoint."""
     try:
+        task_id = validate_task_id(task_id)
         result = await run_in_threadpool(
             cad_pipeline_service.resume_task,
             task_id=task_id,
@@ -238,14 +246,17 @@ async def resume_task(task_id: str, request: dict):
         raise HTTPException(status_code=500, detail=f"Resume task failed: {exc}") from exc
 
 
-@router.get("/tasks/{task_id}/logs")
+@router.get("/tasks/{task_id}/logs", dependencies=[Depends(require_admin_access)])
 async def get_task_logs(task_id: str):
     """Get human-readable logs for a CAD task."""
     try:
+        task_id = validate_task_id(task_id)
         logs = await run_in_threadpool(cad_pipeline_service.get_task_logs, task_id)
         return JSONResponse({"success": True, "data": {"logs": logs}})
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Get logs failed: {exc}") from exc
 
@@ -253,15 +264,18 @@ async def get_task_logs(task_id: str):
 @router.delete("/tasks/{task_id}", dependencies=[Depends(require_admin_access)])
 async def delete_task(task_id: str):
     try:
+        task_id = validate_task_id(task_id)
         cad_pipeline_service.delete_task(task_id)
         return JSONResponse({"success": True, "message": f"task {task_id} deleted"})
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Delete task failed: {exc}") from exc
 
 
-@router.post("/translate-text")
+@router.post("/translate-text", dependencies=[Depends(require_admin_access)])
 async def translate_text(
     text: str = Form(...),
     target_language: str = Form(default="en"),
@@ -289,7 +303,7 @@ async def translate_text(
         raise HTTPException(status_code=500, detail=f"Translation failed: {exc}") from exc
 
 
-@router.post("/translate-batch")
+@router.post("/translate-batch", dependencies=[Depends(require_admin_access)])
 async def batch_translate_texts(request: dict):
     texts = request.get("texts", [])
     target_lang = request.get("target_lang", "en")
@@ -307,6 +321,7 @@ async def batch_translate_texts(request: dict):
         raise HTTPException(status_code=500, detail=f"Batch translation failed: {exc}") from exc
 
 
+# Public endpoint — returns service liveness only, no data exposure.
 @router.get("/health")
 async def health_check():
     return JSONResponse(
@@ -321,6 +336,10 @@ async def health_check():
     )
 
 
-@router.put("/dictionary/{task_id}/update")
+@router.put("/dictionary/{task_id}/update", dependencies=[Depends(require_admin_access)])
 async def update_dictionary_entry(task_id: str, request: dict):
+    try:
+        task_id = validate_task_id(task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"success": True, "message": "dictionary update acknowledged", "task_id": task_id, "request": request}

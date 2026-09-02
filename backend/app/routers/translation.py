@@ -12,11 +12,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import structlog
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from app.config import get_settings
 from app.utils.file_utils import get_safe_filename, resolve_within_directory
+from app.security import require_admin_access
 from app.schemas.translation import (
     BatchTranslationRequest,
     ExcelTranslationResponse,
@@ -41,7 +42,7 @@ router = APIRouter(prefix="/api/translation", tags=["translation"])
 settings = get_settings()
 
 
-@router.post("/glossary/upload")
+@router.post("/glossary/upload", dependencies=[Depends(require_admin_access)])
 async def upload_glossary_file(file: UploadFile = File(...)):
     try:
         if not file.filename:
@@ -73,7 +74,7 @@ async def upload_glossary_file(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"glossary upload failed: {exc}")
 
 
-@router.post("/text", response_model=TranslationResponse)
+@router.post("/text", response_model=TranslationResponse, dependencies=[Depends(require_admin_access)])
 async def translate_text(request: TranslationRequest):
     try:
         translated_text = alibaba_ai_translation_service.translate_text(
@@ -93,7 +94,7 @@ async def translate_text(request: TranslationRequest):
         raise HTTPException(status_code=500, detail=f"translation failed: {exc}")
 
 
-@router.post("/batch", response_model=List[TranslationResponse])
+@router.post("/batch", response_model=List[TranslationResponse], dependencies=[Depends(require_admin_access)])
 async def translate_batch(request: BatchTranslationRequest):
     try:
         # Upper bound is enforced by the BatchTranslationRequest Pydantic
@@ -120,7 +121,7 @@ async def translate_batch(request: BatchTranslationRequest):
         raise HTTPException(status_code=500, detail=f"batch translation failed: {exc}")
 
 
-@router.post("/excel", response_model=ExcelTranslationResponse)
+@router.post("/excel", response_model=ExcelTranslationResponse, dependencies=[Depends(require_admin_access)])
 async def translate_excel_file(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -141,7 +142,11 @@ async def translate_excel_file(
             temp_input.write(await file.read())
             temp_input_path = temp_input.name
 
-        output_filename = f"translated_{get_safe_filename(file.filename)}"
+        # Use a unique output filename to prevent concurrent uploads with the
+        # same original filename from overwriting each other's results.
+        safe_stem = Path(get_safe_filename(file.filename)).stem.replace(" ", "_")
+        suffix = Path(file.filename).suffix.lower()
+        output_filename = f"translated_{uuid.uuid4().hex}_{safe_stem}{suffix}"
         output_path = settings.get_output_path() / output_filename
 
         try:
@@ -174,7 +179,7 @@ async def translate_excel_file(
         raise HTTPException(status_code=500, detail=f"excel translation failed: {exc}")
 
 
-@router.post("/excel/async", response_model=Dict[str, Any])
+@router.post("/excel/async", response_model=Dict[str, Any], dependencies=[Depends(require_admin_access)])
 async def translate_excel_file_async(
     file: UploadFile = File(...),
     text_columns: Optional[str] = Form(None),
@@ -213,7 +218,7 @@ async def translate_excel_file_async(
         raise HTTPException(status_code=500, detail=f"task submit failed: {exc}")
 
 
-@router.get("/task/{task_id}")
+@router.get("/task/{task_id}", dependencies=[Depends(require_admin_access)])
 async def get_translation_task_status(task_id: str):
     try:
         from app.services.celery_app import celery_app
@@ -250,7 +255,7 @@ async def get_translation_task_status(task_id: str):
         raise HTTPException(status_code=500, detail=f"task status failed: {exc}")
 
 
-@router.get("/download/{filename}")
+@router.get("/download/{filename}", dependencies=[Depends(require_admin_access)])
 async def download_translated_file(filename: str):
     try:
         file_path = resolve_within_directory(settings.get_output_path(), filename)
@@ -268,7 +273,7 @@ async def download_translated_file(filename: str):
         raise HTTPException(status_code=500, detail=f"download failed: {exc}")
 
 
-@router.get("/languages")
+@router.get("/languages")  # Public: only lists supported languages, no sensitive data.
 async def get_supported_languages():
     return {
         "languages": settings.SUPPORTED_LANGUAGES,
@@ -277,7 +282,7 @@ async def get_supported_languages():
     }
 
 
-@router.get("/providers")
+@router.get("/providers", dependencies=[Depends(require_admin_access)])
 async def get_provider_presets():
     return {
         "active": runtime_config_service.get_public_runtime_summary(),
@@ -286,7 +291,7 @@ async def get_provider_presets():
     }
 
 
-@router.post("/providers/custom")
+@router.post("/providers/custom", dependencies=[Depends(require_admin_access)])
 async def save_custom_provider(request: CustomProviderPayload):
     try:
         add_custom_provider(
@@ -302,7 +307,7 @@ async def save_custom_provider(request: CustomProviderPayload):
         raise HTTPException(status_code=500, detail=f"Failed to add custom provider: {exc}")
 
 
-@router.delete("/providers/custom/{provider_id}")
+@router.delete("/providers/custom/{provider_id}", dependencies=[Depends(require_admin_access)])
 async def remove_custom_provider(provider_id: str):
     success = delete_custom_provider(provider_id)
     if not success:
@@ -310,7 +315,7 @@ async def remove_custom_provider(provider_id: str):
     return {"success": True, "message": "Custom provider deleted"}
 
 
-@router.get("/config")
+@router.get("/config", dependencies=[Depends(require_admin_access)])
 async def get_translation_config():
     return {
         "supported_languages": settings.SUPPORTED_LANGUAGES,
@@ -325,7 +330,7 @@ async def get_translation_config():
     }
 
 
-@router.post("/config")
+@router.post("/config", dependencies=[Depends(require_admin_access)])
 async def save_translation_config(request: RuntimeConfigUpdateRequest):
     try:
         return runtime_config_service.update_runtime_config(request.model_dump(exclude_none=False))
@@ -336,7 +341,7 @@ async def save_translation_config(request: RuntimeConfigUpdateRequest):
         raise HTTPException(status_code=500, detail=f"save config failed: {exc}")
 
 
-@router.post("/test-connection", response_model=RuntimeConnectionTestResponse)
+@router.post("/test-connection", response_model=RuntimeConnectionTestResponse, dependencies=[Depends(require_admin_access)])
 async def test_translation_connection(request: RuntimeConfigUpdateRequest):
     try:
         return RuntimeConnectionTestResponse(

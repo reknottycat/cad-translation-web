@@ -1,0 +1,6 @@
+# Git attributes for CAD Translation System
+# CRLF is used in some legacy files; tell git not to flag CR-at-EOL
+# as a whitespace error in git diff --check.
+backend/app/routers/files.py whitespace=cr-at-eol
+backend/app/routers/projects.py whitespace=cr-at-eol
+backend/app/database.py whitespace=cr-at-eol

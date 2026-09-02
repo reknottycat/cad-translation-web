@@ -8,6 +8,7 @@ import json
 import os
 import re
 import time
+import contextlib
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -372,6 +373,30 @@ class LLMTranslationService:
         # Rate limiting (rpm/tpm) state, keyed by provider/base_url/model.
         self._rate_lock = threading.Lock()
         self._rate_buckets: Dict[Tuple[str, str, str, str], _TokenBucket] = {}
+        # Thread-local frozen LLM config override.  When set (e.g. a task is
+        # mid-flight with a captured config snapshot), ``_active_config()``
+        # uses this override instead of reading the live global config so a
+        # concurrent admin config change cannot alter the task's behaviour.
+        self._thread_local = threading.local()
+
+    # --- Frozen-config context manager ---
+    @contextlib.contextmanager
+    def frozen_config(self, llm_config: dict[str, Any] | None) -> Iterator[None]:
+        """Temporarily override the active LLM config for this thread.
+
+        When ``llm_config`` (a raw ``llm`` section dict from a config file)
+        is provided, ``_active_config()`` will use it instead of reading the
+        live server-global config.  API keys are resolved at call time from
+        the live config / env (the frozen snapshot has them redacted), so a
+        mid-flight config change of provider/model/parameters cannot alter a
+        task's behaviour while the secret stays fresh.
+        """
+        prev = getattr(self._thread_local, "frozen_llm_config", None)
+        self._thread_local.frozen_llm_config = llm_config
+        try:
+            yield
+        finally:
+            self._thread_local.frozen_llm_config = prev
 
     @staticmethod
     def _is_translatable_text(text: str) -> bool:
@@ -589,7 +614,24 @@ class LLMTranslationService:
         }
 
     def _active_config(self) -> Dict[str, Any]:
-        file_runtime = ConfigManager().get_effective_config().get("llm", {})
+        frozen = getattr(self._thread_local, "frozen_llm_config", None)
+        if frozen is not None:
+            # Use the frozen (snapshot) llm section.  Live API-key resolution
+            # still applies so secrets never go stale or get exposed.
+            file_runtime = dict(frozen)
+            live_runtime = ConfigManager().get_effective_config().get("llm", {})
+            # Merge live API keys into the frozen config for key resolution.
+            file_runtime.setdefault("provider_api_keys", live_runtime.get("provider_api_keys"))
+            primary_raw = dict(frozen.get("primary") or {})
+            live_primary = dict(live_runtime.get("primary") or {})
+            # Redacted ``"***"`` keys in the snapshot must be replaced with
+            # the live API key (resolved at call time).
+            frozen_key = str(primary_raw.get("api_key") or "").strip()
+            if not frozen_key or frozen_key == "***":
+                primary_raw["api_key"] = live_primary.get("api_key", "")
+            file_runtime["primary"] = primary_raw
+        else:
+            file_runtime = ConfigManager().get_effective_config().get("llm", {})
         provider_api_keys = file_runtime.get("provider_api_keys") if isinstance(file_runtime, dict) else None
         primary = self._resolve_candidate_config(file_runtime.get("primary") or {}, provider_api_keys)
         configured_glossary = str(file_runtime.get("glossary_file") or self._setting_default("LLM_GLOSSARY_FILE") or "").strip()
@@ -1317,6 +1359,16 @@ class LLMTranslationService:
         if not texts:
             return []
 
+        # Capture the frozen LLM config from the calling thread.  When a task
+        # runs inside ``frozen_config`` (a task config snapshot), this raw
+        # ``llm`` section dict is what ``_active_config()`` resolves against.
+        # Worker threads spawned below via ``ThreadPoolExecutor`` do **not**
+        # share the caller's ``threading.local`` state, so we explicitly
+        # re-enter ``frozen_config`` inside each worker so every call chain
+        # (``_translate_batch_json`` / ``translate_text`` / ``_chat`` →
+        # ``_active_config``) sees the same task snapshot.
+        _parent_frozen_llm = getattr(self._thread_local, "frozen_llm_config", None)
+
         runtime = self._active_config()
         batch_size = max(1, int(runtime["batch_size"]))
         batch_json_enabled = bool(runtime["batch_json"])
@@ -1364,21 +1416,42 @@ class LLMTranslationService:
             chunk_index: int,
             chunk: List[str],
         ) -> Tuple[int, Dict[str, str], str]:
-            """Worker function to translate a single chunk."""
-            chunk_translated: Dict[str, str] = {}
-            chunk_error = ""
+            """Worker function to translate a single chunk.
 
-            try:
-                if batch_json_enabled and len(chunk) > 1:
-                    chunk_translated.update(
-                        self._translate_batch_json(
-                            chunk,
-                            source_lang,
-                            target_lang,
-                            system_prompt_override=system_prompt,
+            When ``parallel_count > 1`` this runs on a ``ThreadPoolExecutor``
+            worker thread whose ``threading.local`` is isolated from the
+            calling thread.  We therefore re-enter the ``frozen_config``
+            context with the snapshot captured above so that every nested
+            call (``_translate_batch_json`` / ``translate_text`` / ``_chat``
+            → ``_active_config``) resolves to the task's immutable snapshot
+            instead of the live global config that may have changed mid-flight.
+            """
+            with self.frozen_config(_parent_frozen_llm):
+                chunk_translated: Dict[str, str] = {}
+                chunk_error = ""
+
+                try:
+                    if batch_json_enabled and len(chunk) > 1:
+                        chunk_translated.update(
+                            self._translate_batch_json(
+                                chunk,
+                                source_lang,
+                                target_lang,
+                                system_prompt_override=system_prompt,
+                            )
                         )
-                    )
-                else:
+                    else:
+                        for t in chunk:
+                            raise_if_cancelled()
+                            chunk_translated[t] = self.translate_text(
+                                t,
+                                source_lang,
+                                target_lang,
+                                system_prompt_override=system_prompt,
+                            )
+                except Exception as exc:
+                    chunk_error = str(exc)
+                    logger.warning("batch_json_failed_fallback_single", error=str(exc))
                     for t in chunk:
                         raise_if_cancelled()
                         chunk_translated[t] = self.translate_text(
@@ -1387,17 +1460,6 @@ class LLMTranslationService:
                             target_lang,
                             system_prompt_override=system_prompt,
                         )
-            except Exception as exc:
-                chunk_error = str(exc)
-                logger.warning("batch_json_failed_fallback_single", error=str(exc))
-                for t in chunk:
-                    raise_if_cancelled()
-                    chunk_translated[t] = self.translate_text(
-                        t,
-                        source_lang,
-                        target_lang,
-                        system_prompt_override=system_prompt,
-                    )
 
             return chunk_index, chunk_translated, chunk_error
 
