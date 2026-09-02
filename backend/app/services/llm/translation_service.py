@@ -1359,6 +1359,16 @@ class LLMTranslationService:
         if not texts:
             return []
 
+        # Capture the frozen LLM config from the calling thread.  When a task
+        # runs inside ``frozen_config`` (a task config snapshot), this raw
+        # ``llm`` section dict is what ``_active_config()`` resolves against.
+        # Worker threads spawned below via ``ThreadPoolExecutor`` do **not**
+        # share the caller's ``threading.local`` state, so we explicitly
+        # re-enter ``frozen_config`` inside each worker so every call chain
+        # (``_translate_batch_json`` / ``translate_text`` / ``_chat`` →
+        # ``_active_config``) sees the same task snapshot.
+        _parent_frozen_llm = getattr(self._thread_local, "frozen_llm_config", None)
+
         runtime = self._active_config()
         batch_size = max(1, int(runtime["batch_size"]))
         batch_json_enabled = bool(runtime["batch_json"])
@@ -1406,21 +1416,42 @@ class LLMTranslationService:
             chunk_index: int,
             chunk: List[str],
         ) -> Tuple[int, Dict[str, str], str]:
-            """Worker function to translate a single chunk."""
-            chunk_translated: Dict[str, str] = {}
-            chunk_error = ""
+            """Worker function to translate a single chunk.
 
-            try:
-                if batch_json_enabled and len(chunk) > 1:
-                    chunk_translated.update(
-                        self._translate_batch_json(
-                            chunk,
-                            source_lang,
-                            target_lang,
-                            system_prompt_override=system_prompt,
+            When ``parallel_count > 1`` this runs on a ``ThreadPoolExecutor``
+            worker thread whose ``threading.local`` is isolated from the
+            calling thread.  We therefore re-enter the ``frozen_config``
+            context with the snapshot captured above so that every nested
+            call (``_translate_batch_json`` / ``translate_text`` / ``_chat``
+            → ``_active_config``) resolves to the task's immutable snapshot
+            instead of the live global config that may have changed mid-flight.
+            """
+            with self.frozen_config(_parent_frozen_llm):
+                chunk_translated: Dict[str, str] = {}
+                chunk_error = ""
+
+                try:
+                    if batch_json_enabled and len(chunk) > 1:
+                        chunk_translated.update(
+                            self._translate_batch_json(
+                                chunk,
+                                source_lang,
+                                target_lang,
+                                system_prompt_override=system_prompt,
+                            )
                         )
-                    )
-                else:
+                    else:
+                        for t in chunk:
+                            raise_if_cancelled()
+                            chunk_translated[t] = self.translate_text(
+                                t,
+                                source_lang,
+                                target_lang,
+                                system_prompt_override=system_prompt,
+                            )
+                except Exception as exc:
+                    chunk_error = str(exc)
+                    logger.warning("batch_json_failed_fallback_single", error=str(exc))
                     for t in chunk:
                         raise_if_cancelled()
                         chunk_translated[t] = self.translate_text(
@@ -1429,17 +1460,6 @@ class LLMTranslationService:
                             target_lang,
                             system_prompt_override=system_prompt,
                         )
-            except Exception as exc:
-                chunk_error = str(exc)
-                logger.warning("batch_json_failed_fallback_single", error=str(exc))
-                for t in chunk:
-                    raise_if_cancelled()
-                    chunk_translated[t] = self.translate_text(
-                        t,
-                        source_lang,
-                        target_lang,
-                        system_prompt_override=system_prompt,
-                    )
 
             return chunk_index, chunk_translated, chunk_error
 

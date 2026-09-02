@@ -59,7 +59,7 @@ def _get_process_lock(path: Path) -> threading.RLock:
 
 
 @contextlib.contextmanager
-def file_lock(path: Path, blocking: bool = True) -> Iterator[None]:
+def file_lock(path: Path, blocking: bool = True, create_parents: bool = True) -> Iterator[None]:
     """Acquire an advisory cross-process file lock for ``path``.
 
     The lock is held on a **sidecar ``.lock`` file** that is separate from the
@@ -73,10 +73,19 @@ def file_lock(path: Path, blocking: bool = True) -> Iterator[None]:
         path:    The file to protect.  The sidecar is ``<path>.lock``.
         blocking: If True, block until the lock is acquired. If False, raise
                   ``TimeoutError`` if the lock cannot be acquired immediately.
+        create_parents: If True (default), create missing parent directories
+                  of the sidecar. If False, raise ``FileNotFoundError`` when
+                  the parent directory does not exist — used by code paths
+                  that must NOT recreate a deleted task directory.
     """
     path = Path(path).resolve()
     sidecar = _sidecar_path(path)
-    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    if create_parents:
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+    elif not sidecar.parent.exists():
+        raise FileNotFoundError(
+            f"Cannot lock {path.name}: parent directory does not exist: {sidecar.parent}"
+        )
     lock_key = str(sidecar)
 
     # In-process lock first (RLock is re-entrant within the same thread).
@@ -157,13 +166,19 @@ def _release_os_lock(lock_file) -> None:
             pass
 
 
-def atomic_write_json(path: Path, payload: Any) -> None:
+def atomic_write_json(path: Path, payload: Any, create_parents: bool = True) -> None:
     """Write ``payload`` as JSON to ``path`` atomically (temp + rename).
 
     This prevents readers from seeing a partially written JSON file.
+    When ``create_parents=False`` and the parent directory does not exist,
+    the write is silently skipped (used for task metadata writes after a
+    concurrent delete/clear may have removed the task directory).
     """
     path = Path(path).resolve()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if create_parents:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    elif not path.parent.exists():
+        return  # Parent gone (task dir deleted) — do not recreate orphans.
     fd, tmp_path_str = tempfile.mkstemp(
         prefix=f".{path.name}.",
         suffix=".tmp",
@@ -185,10 +200,18 @@ def atomic_write_json(path: Path, payload: Any) -> None:
         raise
 
 
-def atomic_write_text(path: Path, content: str) -> None:
-    """Write ``content`` to ``path`` atomically (temp + rename)."""
+def atomic_write_text(path: Path, content: str, create_parents: bool = True) -> None:
+    """Write ``content`` to ``path`` atomically (temp + rename).
+
+    When ``create_parents=False`` and the parent directory does not exist,
+    the write is silently skipped (used for task logs after a concurrent
+    delete/clear may have removed the task directory).
+    """
     path = Path(path).resolve()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if create_parents:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    elif not path.parent.exists():
+        return  # Parent gone — do not recreate orphan directories.
     fd, tmp_path_str = tempfile.mkstemp(
         prefix=f".{path.name}.",
         suffix=".tmp",

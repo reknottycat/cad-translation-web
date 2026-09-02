@@ -193,3 +193,38 @@ def test_file_lock_preserves_identity_across_atomic_replace(temp_dir):
     # Target was successfully written
     result = json.loads(target.read_text(encoding="utf-8"))
     assert result == {"data": "v1"}
+
+
+def test_file_lock_create_parents_false_does_not_mkdir(temp_dir):
+    """``file_lock(create_parents=False)`` must NOT create a missing parent
+    directory — it raises ``FileNotFoundError`` instead.  This prevents a
+    writer from re-creating a task directory that was concurrently deleted."""
+    from app.utils.locking import atomic_write_json, file_lock
+
+    # Simulate a deleted task dir: nested path that does not exist.
+    nested = temp_dir / "missing_parent" / "task.json"
+    assert not nested.parent.exists()
+
+    # file_lock with default create_parents=True WOULD create the parent.
+    with file_lock(nested):
+        assert nested.parent.exists(), "create_parents=True should mkdir the parent"
+    assert nested.parent.exists()
+
+    # Now test create_parents=False on a NEW missing parent.
+    nested2 = temp_dir / "another_missing" / "task.json"
+    assert not nested2.parent.exists()
+    try:
+        with file_lock(nested2, create_parents=False):
+            raise AssertionError("file_lock(create_parents=False) should have raised")
+    except FileNotFoundError:
+        pass
+    assert not nested2.parent.exists(), (
+        "file_lock(create_parents=False) must NOT create the parent directory"
+    )
+
+    # atomic_write_json with create_parents=False should silently skip.
+    nested3 = temp_dir / "skip_missing" / "checkpoint.json"
+    atomic_write_json(nested3, {"data": 1}, create_parents=False)
+    assert not nested3.parent.exists(), (
+        "atomic_write_json(create_parents=False) must NOT create the parent"
+    )

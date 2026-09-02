@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import stat
@@ -9,7 +10,7 @@ import uuid
 import zipfile
 from pathlib import Path
 from tempfile import mkstemp
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 import structlog
 import pandas as pd
@@ -49,6 +50,56 @@ class CADPipelineService:
 
     def _task_dir(self, task_id: str) -> Path:
         return self._tasks_root() / task_id
+
+    def _lifecycle_root(self) -> Path:
+        """Stable directory for per-task lifecycle locks.
+
+        Lives as a sibling of ``cad_tasks/`` under the output root so that
+        ``delete_task`` / ``clear_all_tasks`` never remove it.  File locks
+        held here provide a coordination point *outside* the task tree: both
+        task write operations and task deletion acquire the same per-task
+        lifecycle lock, preventing a delete from racing a writer's
+        check-exists→lock→write sequence and closing the TOCTOU window.
+        """
+        root = self.settings.get_output_path() / "cad_task_lifecycle"
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    def _lifecycle_lock_path(self, task_id: str) -> Path:
+        """Return the per-task lifecycle lock file path (outside task tree)."""
+        return self._lifecycle_root() / f"{task_id}.lifecycle"
+
+    @contextlib.contextmanager
+    def _task_lifecycle_lock(self, task_id: str) -> Iterator[None]:
+        """Acquire the per-task lifecycle lock.
+
+        Both writers (``_save_task``/``_update_task``/``_append_log``/
+        ``_save_checkpoint``) and deleters (``delete_task``/``clear_all_tasks``)
+        hold this lock while operating on a task directory, so a delete cannot
+        happen between a writer's ``exists()`` check and its file-level lock
+        acquisition inside the task tree.
+        """
+        lock_path = self._lifecycle_lock_path(task_id)
+        with file_lock(lock_path):
+            yield
+
+    def _cleanup_lifecycle_lock(self, task_id: str) -> None:
+        """Remove the per-task lifecycle lock file + sidecar after a delete.
+
+        Called after ``delete_task`` / ``clear_all_tasks`` has released the
+        lifecycle lock and the task dir is gone.  Safe to call even if a
+        concurrent worker briefly grabs the lock afterwards: the worker will
+        find ``task_dir.exists() == False`` and skip — it never creates a
+        new lifecycle lock file because ``_task_lifecycle_lock`` uses
+        ``file_lock`` which creates the sidecar in the stable lifecycle root.
+        """
+        lock_path = self._lifecycle_lock_path(task_id)
+        lock_sidecar = Path(str(lock_path) + ".lock")
+        try:
+            lock_path.unlink(missing_ok=True)
+            lock_sidecar.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     # --- Cross-process cancellation markers (file-based) ---
     # Each task directory may contain a `.cancel` marker file. Any worker
@@ -260,41 +311,64 @@ class CADPipelineService:
         If the task directory no longer exists (e.g. it was deleted by a
         concurrent ``delete_task`` / ``clear_all_tasks``), writing is skipped
         so no orphan files are re-created.
+
+        The task lifecycle lock (outside the task tree) is held for the whole
+        exists→lock→append sequence so a concurrent delete cannot slip into
+        the TOCTOU gap.  ``file_lock(..., create_parents=False)`` additionally
+        guarantees the sidecar lock cannot recreate a deleted task directory.
         """
         if not task_id:
             return
         log_path = self._task_log_path(task_id)
-        if not log_path.parent.exists():
-            return
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        with file_lock(log_path):
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write(f"[{timestamp}] {message}\n")
-                f.flush()
+        with self._task_lifecycle_lock(task_id):
+            if not log_path.parent.exists():
+                return
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            try:
+                with file_lock(log_path, create_parents=False):
+                    if not log_path.parent.exists():
+                        return
+                    with open(log_path, "a", encoding="utf-8") as f:
+                        f.write(f"[{timestamp}] {message}\n")
+                        f.flush()
+            except FileNotFoundError:
+                return  # Task dir deleted concurrently.
 
     def _save_checkpoint(self, task_id: str, translations: list[dict[str, str]]) -> None:
         """Save translation checkpoint to disk.
 
         If the task directory no longer exists (deleted concurrently), writing
         is skipped so no orphan checkpoint file is created.
+
+        The task lifecycle lock protects the full exists→lock→write sequence
+        from a concurrent delete/clear; ``create_parents=False`` prevents the
+        checkpoint sidecar from recreating a deleted task directory.
         """
         if not task_id:
             return
         checkpoint_path = self._task_checkpoint_path(task_id)
-        if not checkpoint_path.parent.exists():
-            return
-        # Cross-process + in-process lock on the checkpoint file's sidecar.
-        with file_lock(checkpoint_path):
-            atomic_write_json(checkpoint_path, translations)
+        with self._task_lifecycle_lock(task_id):
+            if not checkpoint_path.parent.exists():
+                return
+            try:
+                # Cross-process + in-process lock on the checkpoint file's sidecar.
+                with file_lock(checkpoint_path, create_parents=False):
+                    atomic_write_json(checkpoint_path, translations, create_parents=False)
+            except FileNotFoundError:
+                pass  # Task dir deleted concurrently.
 
     def _load_checkpoint(self, task_id: str) -> list[dict[str, str]]:
         checkpoint_path = self._task_checkpoint_path(task_id)
         if not checkpoint_path.exists():
             return []
         # Cross-process + in-process lock on the checkpoint file's sidecar.
-        with file_lock(checkpoint_path):
-            with open(checkpoint_path, "r", encoding="utf-8") as f:
-                return json.load(f)
+        # create_parents=False: never recreate a deleted task dir.
+        try:
+            with file_lock(checkpoint_path, create_parents=False):
+                with open(checkpoint_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except FileNotFoundError:
+            return []  # Task dir deleted concurrently — no checkpoint.
 
     def _get_translation_runtime(self) -> dict[str, Any]:
         runtime = dict(alibaba_ai_translation_service.get_runtime_summary())
@@ -508,7 +582,9 @@ class CADPipelineService:
             raise FileNotFoundError(f"Task not found: {task_id}")
         # Use a cross-process file lock so concurrent readers see a consistent
         # snapshot even when a writer in another process is mid-update.
-        with file_lock(metadata_path):
+        # create_parents=False: if the dir vanished between the exists check
+        # and the lock acquisition, the lock must NOT recreate it.
+        with file_lock(metadata_path, create_parents=False):
             return json.loads(metadata_path.read_text(encoding="utf-8"))
 
     def _save_task(self, task_id: str, payload: dict[str, Any]) -> None:
@@ -517,16 +593,26 @@ class CADPipelineService:
         If the task directory no longer exists (deleted concurrently by
         ``delete_task`` / ``clear_all_tasks``), writing is skipped so no
         orphan task.json is created in a re-created directory.
+
+        The task lifecycle lock (outside the task tree) coordinates the full
+        exists→lock→write sequence with ``delete_task`` / ``clear_all_tasks``,
+        closing the TOCTOU window. ``create_parents=False`` on both the sidecar
+        file lock and the atomic write guarantees a deleted task dir is never
+        re-created even if the delete races between the checks.
         """
         if not task_id:
             return
         metadata_path = self._task_meta_path(task_id)
-        if not metadata_path.parent.exists():
-            return
-        # Atomic write prevents readers from seeing a truncated/partial JSON.
-        # Cross-process file lock protects against concurrent multi-process writes.
-        with file_lock(metadata_path):
-            atomic_write_json(metadata_path, payload)
+        with self._task_lifecycle_lock(task_id):
+            if not metadata_path.parent.exists():
+                return
+            try:
+                # Atomic write prevents readers from seeing a truncated/partial JSON.
+                # Cross-process file lock protects against concurrent multi-process writes.
+                with file_lock(metadata_path, create_parents=False):
+                    atomic_write_json(metadata_path, payload, create_parents=False)
+            except FileNotFoundError:
+                pass  # Task dir deleted concurrently — skip write.
 
     def _update_task(self, task_id: str, **patch: Any) -> dict[str, Any]:
         """Update task metadata via guarded read-modify-write.
@@ -534,24 +620,34 @@ class CADPipelineService:
         If the task directory no longer exists (e.g. deleted concurrently by
         ``delete_task`` / ``clear_all_tasks``), returns the empty dict and
         does NOT create any files — avoids re-creating orphan task dirs.
+
+        The task lifecycle lock coordinates the full exists→lock→RMW→write
+        sequence with ``delete_task`` / ``clear_all_tasks``, preventing a
+        delete from landing in the TOCTOU gap between the ``exists()`` check
+        and the file-level lock acquisition.
         """
         if not task_id:
             return {}
         metadata_path = self._task_meta_path(task_id)
-        # Guard before acquiring file_lock: if the task dir is gone, do not
-        # let file_lock's sidecar parent.mkdir recreate it.
-        if not metadata_path.parent.exists():
-            return {}
-        # Serialize read-modify-write on the task metadata file so concurrent
-        # updates (including from other processes) don't clobber each other.
-        # file_lock is re-entrant, so _load_task / _save_task nested inside
-        # this block won't deadlock within the same thread.
-        with file_lock(metadata_path):
-            metadata = self._load_task(task_id)
-            metadata.update(patch)
-            metadata["last_activity_at"] = time.time()
-            self._save_task(task_id, metadata)
-            return metadata
+        with self._task_lifecycle_lock(task_id):
+            # Guard before acquiring file_lock: if the task dir is gone, do not
+            # let file_lock's sidecar parent.mkdir recreate it.
+            if not metadata_path.parent.exists():
+                return {}
+            try:
+                # Serialize read-modify-write on the task metadata file so
+                # concurrent updates (including from other processes) don't
+                # clobber each other.  file_lock is re-entrant, so _load_task /
+                # _save_task nested inside this block won't deadlock within
+                # the same thread.
+                with file_lock(metadata_path, create_parents=False):
+                    metadata = self._load_task(task_id)
+                    metadata.update(patch)
+                    metadata["last_activity_at"] = time.time()
+                    self._save_task(task_id, metadata)
+                    return metadata
+            except FileNotFoundError:
+                return {}  # Task dir deleted concurrently — skip update.
 
     def _build_task_summary(self, metadata: dict[str, Any]) -> dict[str, Any]:
         task_id = metadata["task_id"]
@@ -1378,9 +1474,14 @@ class CADPipelineService:
         log_path = self._task_log_path(task_id)
         if log_path.exists():
             # Acquire the same cross-process file lock used by _append_log
-            # so we get a consistent snapshot even mid-write.
-            with file_lock(log_path):
-                return log_path.read_text(encoding="utf-8")
+            # so we get a consistent snapshot even mid-write.  create_parents=False
+            # ensures a deleted task dir is not re-created by the sidecar mkdir.
+            try:
+                with file_lock(log_path, create_parents=False):
+                    if log_path.exists():
+                        return log_path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                pass  # Task dir deleted concurrently — fall through.
         # Fallback: return task metadata as pseudo-log for old tasks.
         # Uses _load_task which acquires the cross-process file lock.
         metadata = self._load_task(task_id)  # raises FileNotFoundError if absent
@@ -1486,9 +1587,15 @@ class CADPipelineService:
         markers signal any worker currently executing a task in this tree
         to stop before we delete files, preventing a "deleted-under-the-writer"
         race where a running worker writes task.json after we removed it.
+
+        Per-task lifecycle locks (in the stable ``cad_task_lifecycle/``
+        directory outside ``cad_tasks/``) are acquired for each discovered
+        task before its directory is removed, so no writer holding the same
+        task lifecycle lock can be mid-write when the delete happens.
         """
         tasks_root = self._tasks_root()
         cancel_root = self._cancel_marks_root()
+        lifecycle_root = self._lifecycle_root()
         # Phase 1: mark all processing/queued tasks as cancelled.
         if tasks_root.exists():
             for metadata_path in tasks_root.glob("*/task.json"):
@@ -1497,11 +1604,33 @@ class CADPipelineService:
                     self._mark_task_cancelled(task_id)
                 except OSError:
                     pass  # Already deleted or locked by another process.
+        # Phase 1b: acquire each task's lifecycle lock so a writer in another
+        # process cannot be mid-sequence (exists→lock→write) when we delete.
+        for metadata_path in list(tasks_root.glob("*/task.json")):
+            task_id = metadata_path.parent.name
+            try:
+                with self._task_lifecycle_lock(task_id):
+                    pass  # Lock held momentarily; the delete below follows.
+            except (OSError, FileNotFoundError):
+                pass  # Task already gone or lifecycle dir cleaned.
         # Phase 2: remove the root tasks directory.
         if tasks_root.exists():
             self._delete_tree(tasks_root)
         # Recreate the root directory to ensure it exists for future tasks
         tasks_root.mkdir(parents=True, exist_ok=True)
+        # Phase 2b: clean up all per-task lifecycle locks now that the task
+        # tree is gone.  Writers that acquire a lifecycle lock after this
+        # point will find ``task_dir.exists() == False`` and skip.
+        for lock_path in lifecycle_root.glob("*.lifecycle"):
+            try:
+                lock_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        for lock_sidecar in lifecycle_root.glob("*.lifecycle.lock"):
+            try:
+                lock_sidecar.unlink(missing_ok=True)
+            except OSError:
+                pass
         # Phase 3: clean up all external cancellation markers now that the
         # task tree is gone and any worker has already observed the deletion.
         if cancel_root.exists():
@@ -1513,21 +1642,24 @@ class CADPipelineService:
 
     def delete_task(self, task_id: str) -> None:
         task_dir = self._task_dir(task_id)
-        if not task_dir.exists():
-            raise FileNotFoundError(f"Task not found: {task_id}")
-        # Mark as cancelled first so any running worker in another process
-        # stops writing before we delete the directory.
-        try:
-            metadata = self._load_task(task_id)
-            status = str(metadata.get("status") or "").strip().lower()
-            if status in {"processing", "queued"}:
-                self._mark_task_cancelled(task_id)
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            pass  # Task may already be gone; still attempt deletion.
-        self._delete_tree(task_dir)
-        # Clean up the external cancellation marker after the directory is
-        # gone.  Any worker that was mid-flight has already observed the
-        # directory deletion and treats the task as cancelled.
+        with self._task_lifecycle_lock(task_id):
+            if not task_dir.exists():
+                raise FileNotFoundError(f"Task not found: {task_id}")
+            # Mark as cancelled first so any running worker in another process
+            # stops writing before we delete the directory.
+            try:
+                metadata = self._load_task(task_id)
+                status = str(metadata.get("status") or "").strip().lower()
+                if status in {"processing", "queued"}:
+                    self._mark_task_cancelled(task_id)
+            except (FileNotFoundError, json.JSONDecodeError, OSError):
+                pass  # Task may already be gone; still attempt deletion.
+            self._delete_tree(task_dir)
+        # Clean up the lifecycle lock file + the external cancellation marker
+        # after the directory is gone (outside the lifecycle lock).  Any
+        # worker that was mid-flight has already observed the directory
+        # deletion and treats the task as cancelled.
+        self._cleanup_lifecycle_lock(task_id)
         self._clear_task_cancel(task_id)
 
     def stop_all_tasks(self) -> dict[str, Any]:
@@ -1539,7 +1671,8 @@ class CADPipelineService:
                 # Hold the task.json file_lock across the entire
                 # read-modify-write so another process/thread cannot race
                 # between the status check and the cancelled-state save.
-                with file_lock(meta_path):
+                # create_parents=False: never recreate a deleted task dir.
+                with file_lock(meta_path, create_parents=False):
                     metadata = self._load_task(task_id)  # re-entrant lock
                     status = str(metadata.get("status") or "").strip().lower()
                     if not task_id or status not in {"processing", "queued"}:
