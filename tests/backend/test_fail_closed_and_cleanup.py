@@ -409,50 +409,49 @@ def test_task_config_snapshot_does_not_leak_api_keys():
 # ------------------- 5. translate_batch honors frozen config -----------------
 
 def test_translate_batch_uses_frozen_config_for_rate_limit_and_params():
-    """translate_batch must use the frozen config for its batch_size etc."""
+    """translate_batch emits progress using the frozen provider/model/batch_size."""
+    import app.config as config_module
+    config_module._settings = None
     from app.services.alibaba_ai_translation_service import alibaba_ai_translation_service
+    from unittest.mock import patch
 
-    # Use mock/demo fallback so no real API call happens
-    frozen = {
-        "primary": {
-            "provider": "custom",
-            "format": "openai_compatible",
-            "base_url": "http://localhost:1/v1",  # never reachable
-            "api_key": "",  # empty → allow_demo_fallback kicks in
-            "model": "frozen-model",
-        },
-        "batch_size": 1,  # Force small batches
-        "batch_json": False,
-        "parallel_count": 1,
-        "retry_count": 0,
-        "rpm": 1,
-        "allow_demo_fallback": True,
-    }
+    # Use a fresh instance with mocked chat to avoid real API calls.
+    svc = alibaba_ai_translation_service
 
-    progress_events: list[dict] = []
+    with patch.object(svc, "_chat", lambda self, messages: "translated"),          patch.object(svc, "_probe_candidate", lambda self, candidate: {"success": True, "message": "ok"}):
+        frozen = {
+            "primary": {
+                "provider": "custom",
+                "format": "openai_compatible",
+                "base_url": "http://localhost:1/v1",
+                "api_key": "test-key",
+                "model": "frozen-model",
+            },
+            "batch_size": 1,
+            "batch_json": False,
+            "parallel_count": 1,
+            "retry_count": 0,
+            "rpm": 1,
+            "allow_demo_fallback": False,
+        }
 
-    def on_progress(p: dict) -> None:
-        progress_events.append(p)
+        progress_events: list[dict] = []
 
-    texts = ["Hello one", "Hello two", "Hello three"]
+        def on_progress(p: dict) -> None:
+            progress_events.append(p)
 
-    with alibaba_ai_translation_service.frozen_config(frozen):
-        # With allow_demo_fallback=true and no API key, it should return
-        # demo mode results rather than fail.
-        result = alibaba_ai_translation_service.translate_batch(
-            texts=texts,
-            source_lang="en",
-            target_lang="zh",
-            progress_callback=on_progress,
-        )
+        with svc.frozen_config(frozen):
+            result = svc.translate_batch(
+                texts=["Hello one", "Hello two", "Hello three"],
+                source_lang="en",
+                target_lang="zh",
+                progress_callback=on_progress,
+            )
 
-    # Verify progress events used the frozen batch_size / provider / model
-    assert progress_events, "No progress events emitted"
-    first_event = progress_events[0]
-    assert first_event["event"] == "started"
-    assert first_event["provider"] == "custom", \
-        f"Expected frozen provider, got {first_event.get('provider')}"
-    assert first_event["model"] == "frozen-model", \
-        f"Expected frozen model, got {first_event.get('model')}"
-    # Each chunk should have at most batch_size=1 items since we set batch=1
-    assert len(result) == len(texts), "All texts should produce results"
+        # Verify progress events used the frozen batch_size / provider / model
+        assert progress_events, "No progress events emitted"
+        first_event = progress_events[0]
+        assert first_event["event"] == "started"
+        assert first_event["provider"] == "custom"
+        assert first_event["model"] == "frozen-model"
+        assert len(result) == 3, "All three texts should have translations"
