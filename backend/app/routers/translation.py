@@ -74,7 +74,7 @@ async def upload_glossary_file(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"glossary upload failed: {exc}")
 
 
-@router.post("/text", response_model=TranslationResponse)
+@router.post("/text", response_model=TranslationResponse, dependencies=[Depends(require_admin_access)])
 async def translate_text(request: TranslationRequest):
     try:
         translated_text = alibaba_ai_translation_service.translate_text(
@@ -94,7 +94,7 @@ async def translate_text(request: TranslationRequest):
         raise HTTPException(status_code=500, detail=f"translation failed: {exc}")
 
 
-@router.post("/batch", response_model=List[TranslationResponse])
+@router.post("/batch", response_model=List[TranslationResponse], dependencies=[Depends(require_admin_access)])
 async def translate_batch(request: BatchTranslationRequest):
     try:
         # Upper bound is enforced by the BatchTranslationRequest Pydantic
@@ -218,7 +218,7 @@ async def translate_excel_file_async(
         raise HTTPException(status_code=500, detail=f"task submit failed: {exc}")
 
 
-@router.get("/task/{task_id}")
+@router.get("/task/{task_id}", dependencies=[Depends(require_admin_access)])
 async def get_translation_task_status(task_id: str):
     try:
         from app.services.celery_app import celery_app
@@ -273,7 +273,7 @@ async def download_translated_file(filename: str):
         raise HTTPException(status_code=500, detail=f"download failed: {exc}")
 
 
-@router.get("/languages")
+@router.get("/languages")  # Public: only lists supported languages, no sensitive data.
 async def get_supported_languages():
     return {
         "languages": settings.SUPPORTED_LANGUAGES,
@@ -282,7 +282,7 @@ async def get_supported_languages():
     }
 
 
-@router.get("/providers")
+@router.get("/providers", dependencies=[Depends(require_admin_access)])
 async def get_provider_presets():
     return {
         "active": runtime_config_service.get_public_runtime_summary(),
@@ -315,7 +315,7 @@ async def remove_custom_provider(provider_id: str):
     return {"success": True, "message": "Custom provider deleted"}
 
 
-@router.get("/config")
+@router.get("/config", dependencies=[Depends(require_admin_access)])
 async def get_translation_config():
     return {
         "supported_languages": settings.SUPPORTED_LANGUAGES,

@@ -23,7 +23,7 @@ async def _validate_uploaded_cad_file(file: UploadFile) -> None:
         raise HTTPException(status_code=400, detail=validation.get("error", "Invalid file"))
 
 
-@router.get("/defaults")
+@router.get("/defaults", dependencies=[Depends(require_admin_access)])
 async def get_cad_defaults():
     try:
         return JSONResponse({"success": True, "data": runtime_config_service.get_cad_defaults_summary()})
@@ -261,7 +261,7 @@ async def delete_task(task_id: str):
         raise HTTPException(status_code=500, detail=f"Delete task failed: {exc}") from exc
 
 
-@router.post("/translate-text")
+@router.post("/translate-text", dependencies=[Depends(require_admin_access)])
 async def translate_text(
     text: str = Form(...),
     target_language: str = Form(default="en"),
@@ -289,7 +289,7 @@ async def translate_text(
         raise HTTPException(status_code=500, detail=f"Translation failed: {exc}") from exc
 
 
-@router.post("/translate-batch")
+@router.post("/translate-batch", dependencies=[Depends(require_admin_access)])
 async def batch_translate_texts(request: dict):
     texts = request.get("texts", [])
     target_lang = request.get("target_lang", "en")
@@ -307,6 +307,7 @@ async def batch_translate_texts(request: dict):
         raise HTTPException(status_code=500, detail=f"Batch translation failed: {exc}") from exc
 
 
+# Public endpoint — returns service liveness only, no data exposure.
 @router.get("/health")
 async def health_check():
     return JSONResponse(

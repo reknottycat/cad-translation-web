@@ -120,7 +120,11 @@ class Settings(BaseSettings):
     DEEPSEEK_MODEL: str = Field(default="deepseek-chat")
 
     JWT_SECRET_KEY: str = Field(default="change-this-in-production")
-    ENABLE_ADMIN_GUARD: bool = Field(default=False)
+    # Single-tenant safety boundary: admin guard is ON by default so that
+    # sensitive task/project/config/file endpoints are protected even without
+    # an explicit .env opt-in. For trusted internal single-user deployments
+    # the operator may set ENABLE_ADMIN_GUARD=false explicitly.
+    ENABLE_ADMIN_GUARD: bool = Field(default=True)
     ADMIN_API_TOKEN: str = Field(default="")
 
     DEFAULT_SOURCE_LANGUAGE: str = Field(default="zh")

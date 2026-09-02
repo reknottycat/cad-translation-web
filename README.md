@@ -137,7 +137,7 @@ powershell -ExecutionPolicy Bypass -File scripts/build_scale_exe_nuitka.ps1
 
 ## Security Notes
 
-1. Admin guard is off by default. Enable `ENABLE_ADMIN_GUARD=true` and set `ADMIN_API_TOKEN` in `backend/.env` before exposing dangerous endpoints.
+1. Admin guard is **on by default** (`ENABLE_ADMIN_GUARD=true`). Set `ADMIN_API_TOKEN` in `backend/.env` to enable token-based protection for all task/project/file/config/translation endpoints. If no token is configured, the instance runs in trusted-network single-tenant mode (open access), which is safe only on an isolated internal network.
 2. Packaging scripts sanitize API keys from runtime configuration, but development `.env` files must still be kept private.
 3. Backend file handling uses `resolve_within_directory` and `get_safe_filename` to prevent path traversal.
 4. Local development uses HTTP. For public deployment, terminate TLS at a reverse proxy.
@@ -174,23 +174,27 @@ The system is designed to support multiple users processing CAD tasks concurrent
 
 ### Security & Authorization Model
 
-**Single-tenant model**: This system is designed as a single-tenant web application for internal deployment. It has **no per-user accounts** and does **not** attempt to provide multi-tenant data isolation between distinct users on the same instance.
+**Single-tenant model**: This system is a single-tenant web application for internal deployment. It has **no per-user accounts** and does **not** attempt to provide per-user data isolation between different individuals on the same instance. All projects/tasks/files on one instance belong to the same logical tenant.
 
-- When `ENABLE_ADMIN_GUARD=false` (default), all API endpoints are accessible to any client that can reach the server. This is appropriate for a trusted internal network deployment.
-- When `ENABLE_ADMIN_GUARD=true` and `ADMIN_API_TOKEN` is set, **all** task/project/file/config endpoints (not just destructive ones) require the admin token via `X-Admin-Token` or `Authorization: Bearer <token>` headers. A `task_id` alone does **not** grant access when the admin guard is enabled.
-- Cross-tenant isolation would require adding a user authentication system (login, session/JWT, per-user data scoping), which is explicitly **out of scope** for this codebase. If multiple independent tenants must share one server, a reverse-proxy or separate deployment per tenant is recommended.
+- **`ENABLE_ADMIN_GUARD` is ON by default.** Set `ADMIN_API_TOKEN` in `backend/.env` to require a token for every sensitive task/project/file/config/translation endpoint. Callers authenticate with `X-Admin-Token: <token>` or `Authorization: Bearer <token>`.
+- If `ENABLE_ADMIN_GUARD=true` but `ADMIN_API_TOKEN` is left empty, the system operates as a trusted-network deployment (no token checks) — suitable only on an isolated private network where all clients are trusted.
+- Explicitly set `ENABLE_ADMIN_GUARD=false` to skip all token checks even when a token is configured (not recommended).
+- A `task_id` / `project_id` / `file_id` alone is **not** an access credential — it only identifies a resource once the caller has passed the admin guard.
+- Cross-tenant isolation would require adding a user authentication system (login, session/JWT, per-user ownership columns on projects/tasks/files, per-user data-scoped queries), which is **out of scope** for this codebase. To serve multiple independent tenants from one host, deploy one instance per tenant or place a reverse proxy / SSO in front of separate deployments.
 
 ### Global Runtime Configuration
 
-The LLM/CAD runtime configuration (stored in `~/.config/cli-anything-cad/config.json`) is deliberately designed as **server-global configuration** shared by all users and tasks:
+The LLM/CAD runtime configuration (stored in `~/.config/cli-anything-cad/config.json`) is deliberately designed as **server-global configuration** shared by all users and tasks.
 
-- Updating the runtime config while translation or CAD tasks are in-flight **may affect** those tasks at their next config read.
+- Each task **captures a sanitized config snapshot** in its `task.json` at creation/resume time. Task-level parameters (batch_size, provider/model, parallel_count, retry_count, glossary) are read from this snapshot so an admin changing the global config mid-flight does **not** silently alter the processing profile of already-running tasks.
 - Concurrent updates to the runtime config are protected by the same file-lock mechanism, so writes are serialized and JSON is never corrupted.
-- To isolate configuration per user, project, or task, modify the workflow engine to snapshot the effective config at task start. This is out of scope for the current codebase.
+- Config writes are guarded by `require_admin_access` (admin token). Non-admin users cannot change the global config.
+- To serve per-user or per-project configuration, extend the workflow engine to snapshot the effective config into each task's context at start.
 
 ### Known limitations in multi-process mode
 
 - Cross-process file locks protect task metadata and config writes.
-- However, in-process task cancellation (`_cancelled_task_ids`) is not shared across processes. Stop/cancel operations affect the process that initiated them.
+- **Cross-process cancellation is file-based**: stop/cancel operations write a `.cancel` marker in each task directory. Any worker process running that task checks the marker before/after each chunk and aborts cleanly. The marker is removed when the task reaches a terminal state (done/error/cancelled).
+- **Config snapshot per task**: each task stores a sanitized snapshot of the effective LLM/CAD runtime config in `task.json` at creation time. Task-level parameters (batch size, provider/model, parallel count, retry count, glossary) that determine processing are read from this snapshot, so a mid-flight global config change cannot silently alter a task's planned profile. (Actual LLM API calls may still resolve live keys for authentication; this is intended.)
 - LLM rate-limit buckets are per-process. Under multi-worker Celery, RPM/TPM quotas may be exceeded by the aggregate of all workers.
 - `CADPipelineService` module exceeds the 800-line guideline; splitting into submodules is tracked as a follow-up task.

@@ -37,7 +37,6 @@ class CADPipelineService:
     def __init__(self) -> None:
         self.settings = get_settings()
         self.processor = cad_text_processor
-        self._cancelled_task_ids: set[str] = set()
         # 使用模块化工作流管道处理新任务
         self._pipeline = get_pipeline()
         # 注意：跨进程锁由 locking.file_lock 通过旁车 .lock 文件提供。
@@ -50,6 +49,114 @@ class CADPipelineService:
 
     def _task_dir(self, task_id: str) -> Path:
         return self._tasks_root() / task_id
+
+    # --- Cross-process cancellation markers (file-based) ---
+    # Each task directory may contain a `.cancel` marker file. Any worker
+    # process can request cancellation by creating this file. A worker running
+    # a task checks for the marker's existence before/after each chunk.
+    # Unlike the old in-memory `_cancelled_task_ids` set, the file marker is
+    # visible across processes (multi-worker Celery / multi-process uvicorn).
+
+    @staticmethod
+    def _cancel_marker_path(task_dir: Path) -> Path:
+        return task_dir / ".cancel"
+
+    def _is_task_cancelled(self, task_id: str) -> bool:
+        """Cross-process cancellation check.
+
+        Returns True if:
+        1. A `.cancel` marker file exists in the task dir, OR
+        2. The task directory or task.json no longer exists (deleted by
+           `delete_task` / `clear_all_tasks` while a worker was still running).
+
+        Case (2) is critical: after a task is deleted, a running worker must
+        treat it as cancelled rather than re-create orphaned files.
+        """
+        task_dir = self._task_dir(task_id)
+        marker = self._cancel_marker_path(task_dir)
+        if marker.exists():
+            return True
+        meta_path = self._task_meta_path(task_id)
+        # Task dir or task.json gone → task was deleted from under us.
+        if not task_dir.exists() or not meta_path.exists():
+            return True
+        return False
+
+    def _mark_task_cancelled(self, task_id: str) -> None:
+        marker = self._cancel_marker_path(self._task_dir(task_id))
+        task_dir = self._task_dir(task_id)
+        task_dir.mkdir(parents=True, exist_ok=True)
+        with file_lock(marker):
+            marker.touch()
+
+    def _clear_task_cancel(self, task_id: str) -> None:
+        marker = self._cancel_marker_path(self._task_dir(task_id))
+        with file_lock(marker):
+            marker.unlink(missing_ok=True)
+
+    # --- Runtime config snapshot helpers ---
+    def _capture_config_snapshot(self) -> dict[str, Any]:
+        """Capture the effective LLM/CAD runtime config at a point in time.
+
+        This is stored in task.json so that a task's subsequent behavior is
+        deterministic even if the server-global config is updated mid-flight.
+        API keys are redacted so task.json is safe to download/expose.
+        """
+        return {
+            "llm_runtime": self._redact_api_keys(self._get_translation_runtime()),
+            "raw_config_payload": self._redact_api_keys(self._load_runtime_config_payload()),
+        }
+
+    @staticmethod
+    def _redact_api_keys(payload: dict[str, Any]) -> dict[str, Any]:
+        """Recursively replace sensitive key fields with a redacted marker."""
+        sensitive_keys = {
+            "api_key", "apiKey", "secret", "secret_key", "secretKey",
+            "token", "access_token", "api_secret", "apiSecret",
+            "security_token", "session_token", "authorization",
+        }
+
+        def _walk(value: Any) -> Any:
+            if isinstance(value, dict):
+                out: dict[str, Any] = {}
+                for k, v in value.items():
+                    if isinstance(k, str) and k.strip().lower().replace("-", "_") in {
+                        s.lower().replace("-", "_") for s in sensitive_keys
+                    }:
+                        out[k] = "***"
+                    else:
+                        out[k] = _walk(v)
+                return out
+            if isinstance(value, list):
+                return [_walk(v) for v in value]
+            return value
+
+        return _walk(payload)
+
+    def _get_task_config_snapshot(self, task_id: str) -> dict[str, Any]:
+        metadata = self._load_task(task_id)
+        snapshot = metadata.get("config_snapshot")
+        if isinstance(snapshot, dict):
+            return snapshot
+        return {}
+
+    def _snapshot_runtime_summary(self, task_id: str) -> dict[str, Any]:
+        """Return the runtime summary from the task's config snapshot if present,
+        else fall back to live config.
+
+        The snapshot has API keys redacted (safe for task.json), but contains
+        all non-sensitive parameters (batch_size, provider, model, parallel_count,
+        retry_count, glossary settings, etc.) that determine task behaviour.
+        For the LLM service calls themselves, `translate_batch`/`translate_text`
+        internally resolve their own active config at call time; however the
+        task-level parameters that determine chunking and progress reporting
+        come from this snapshot so a mid-flight config change cannot silently
+        alter a task's planned processing profile."""
+        snapshot = self._get_task_config_snapshot(task_id)
+        llm_runtime = snapshot.get("llm_runtime")
+        if isinstance(llm_runtime, dict) and llm_runtime:
+            return llm_runtime
+        return self._get_translation_runtime()
 
     def _task_excel_path(self, task_id: str, metadata: dict[str, Any] | None = None) -> Path:
         metadata = metadata or self._load_task(task_id)
@@ -510,6 +617,7 @@ class CADPipelineService:
             "target_language": target_language,
             "requested_backend": converter_backend or "",
             "resolved_backend": resolved_backend,
+            "config_snapshot": self._capture_config_snapshot(),
             "extract_only": False,
             "status": "processing",
             "stage": "extracting",
@@ -554,11 +662,16 @@ class CADPipelineService:
     ) -> list[dict[str, str]]:
         """Run translation with progress logging and checkpoint saving."""
         if self._is_docutranslate_enabled(runtime_summary):
+            # DocuTranslate adapter needs the full live config (including API key).
+            # The sanitized snapshot lacks the API key, so merge the snapshot's
+            # non-secret keys over the live config.
+            full_runtime = self._get_translation_runtime()
+            full_runtime.update({k: v for k, v in runtime_summary.items() if v != "***"})
             return self._run_docutranslate_translation_with_logging(
                 task_id=task_id,
                 original_texts=original_texts,
                 target_language=target_language,
-                runtime=runtime_summary,
+                runtime=full_runtime,
                 batch_size=batch_size,
                 total_chunks=total_chunks,
                 ensure_not_cancelled=ensure_not_cancelled,
@@ -635,7 +748,7 @@ class CADPipelineService:
             texts=original_texts,
             target_lang=target_language,
             progress_callback=on_translation_progress,
-            should_cancel=lambda: bool(task_id and task_id in self._cancelled_task_ids),
+            should_cancel=lambda: bool(task_id and self._is_task_cancelled(task_id)),
         )
         ensure_not_cancelled()
         translations: list[dict[str, str]] = []
@@ -766,7 +879,7 @@ class CADPipelineService:
         task_id: str | None = None
         try:
             def ensure_not_cancelled() -> None:
-                if task_id and task_id in self._cancelled_task_ids:
+                if task_id and self._is_task_cancelled(task_id):
                     raise TaskCancelledError("Task cancelled by user.")
 
             extract_result = self.extract_upload(
@@ -817,7 +930,10 @@ class CADPipelineService:
                     "translated_cad_file": None,
                 }
 
-            runtime_summary = self._get_translation_runtime()
+            # Use the config snapshot captured when the task was created so
+            # that a mid-flight global config update cannot silently change
+            # batch_size / provider / model / rate-limit params for this task.
+            runtime_summary = self._snapshot_runtime_summary(task_id)
             batch_size = max(1, int(runtime_summary.get("batch_size") or 1))
             translatable_count = alibaba_ai_translation_service.count_translatable_texts(original_texts)
             total_chunks = (translatable_count + batch_size - 1) // batch_size if translatable_count else 0
@@ -905,7 +1021,7 @@ class CADPipelineService:
                     processing_time=f"{time.perf_counter() - started_at:.1f}s",
                 )
                 self._append_log(task_id, f"任务已取消: {exc}")
-                self._cancelled_task_ids.discard(task_id)
+                self._clear_task_cancel(task_id)
             raise
         except Exception as exc:
             cancelled = "cancelled by user" in str(exc).lower() or "stopped by user" in str(exc).lower()
@@ -921,7 +1037,7 @@ class CADPipelineService:
             raise
         finally:
             if task_id:
-                self._cancelled_task_ids.discard(task_id)
+                self._clear_task_cancel(task_id)
 
     def resume_task(
         self,
@@ -936,6 +1052,13 @@ class CADPipelineService:
         metadata = self._load_task(task_id)
         task_dir = self._task_dir(task_id)
 
+        # Refresh the config snapshot for this resumed execution so that
+        # changes made since the original task creation are reflected in the
+        # resumed task's behaviour (the operator chose to resume, so they
+        # implicitly accept the current config as the new baseline).
+        self._update_task(task_id, config_snapshot=self._capture_config_snapshot())
+        metadata = self._load_task(task_id)
+
         text_count = metadata.get("text_count", 0)
         translated_count = metadata.get("translated_count", 0)
         is_done = metadata.get("status") == "done" and metadata.get("stage") == "completed"
@@ -947,7 +1070,7 @@ class CADPipelineService:
         self._append_log(task_id, f"任务恢复: stage={metadata.get('stage')}, status={metadata.get('status')}")
 
         def ensure_not_cancelled() -> None:
-            if task_id in self._cancelled_task_ids:
+            if self._is_task_cancelled(task_id):
                 raise TaskCancelledError("Task cancelled by user.")
 
         # Stage 1: If extraction was not done, we can't resume (need original file re-upload)
@@ -999,7 +1122,7 @@ class CADPipelineService:
                             "translated_cad_file": None,
                         }
 
-                    runtime_summary = self._get_translation_runtime()
+                    runtime_summary = self._snapshot_runtime_summary(task_id)
                     batch_size = max(1, int(runtime_summary.get("batch_size") or 1))
                     translatable_count = alibaba_ai_translation_service.count_translatable_texts(original_texts)
                     total_chunks = (translatable_count + batch_size - 1) // batch_size if translatable_count else 0
@@ -1037,7 +1160,7 @@ class CADPipelineService:
                         failed_texts = [t["original"] for t in failed]
                         failed_record_ids = [str(t.get("record_id") or "").strip() for t in failed]
                         record_ids_for_retry = failed_record_ids if all(failed_record_ids) else None
-                        runtime_summary = self._get_translation_runtime()
+                        runtime_summary = self._snapshot_runtime_summary(task_id)
                         batch_size = max(1, int(runtime_summary.get("batch_size") or 1))
                         translatable_count = alibaba_ai_translation_service.count_translatable_texts(failed_texts)
                         total_chunks = (translatable_count + batch_size - 1) // batch_size if translatable_count else 0
@@ -1138,7 +1261,7 @@ class CADPipelineService:
                 processing_time=f"{time.perf_counter() - started_at:.1f}s",
             )
             self._append_log(task_id, f"恢复任务已取消: {exc}")
-            self._cancelled_task_ids.discard(task_id)
+            self._clear_task_cancel(task_id)
             raise
         except Exception as exc:
             cancelled = "cancelled by user" in str(exc).lower() or "stopped by user" in str(exc).lower()
@@ -1152,7 +1275,7 @@ class CADPipelineService:
             self._append_log(task_id, f"恢复任务失败: {exc}")
             raise
         finally:
-            self._cancelled_task_ids.discard(task_id)
+            self._clear_task_cancel(task_id)
 
     def get_task_logs(self, task_id: str) -> str:
         log_path = self._task_log_path(task_id)
@@ -1258,11 +1381,24 @@ class CADPipelineService:
         return tasks
 
     def clear_all_tasks(self) -> None:
-        """Clear all tasks by removing the root tasks directory."""
+        """Clear all tasks by removing the root tasks directory.
+
+        Cross-process safe: we first mark every processing/queued task as
+        cancelled by writing `.cancel` markers, then remove the task tree.
+        The markers signal any worker currently executing a task in this tree
+        to stop before we delete files, preventing a "deleted-under-the-writer"
+        race where a running worker writes task.json after we removed it.
+        """
         tasks_root = self._tasks_root()
-        self._cancelled_task_ids.clear()
-        # No in-process lock dict to clean up — locking is provided by
-        # file_lock's per-path sidecar files, which are removed with the tree.
+        # Phase 1: mark all processing/queued tasks as cancelled.
+        if tasks_root.exists():
+            for metadata_path in tasks_root.glob("*/task.json"):
+                task_id = metadata_path.parent.name
+                try:
+                    self._mark_task_cancelled(task_id)
+                except OSError:
+                    pass  # Already deleted or locked by another process.
+        # Phase 2: remove the root tasks directory.
         if tasks_root.exists():
             self._delete_tree(tasks_root)
         # Recreate the root directory to ensure it exists for future tasks
@@ -1272,27 +1408,39 @@ class CADPipelineService:
         task_dir = self._task_dir(task_id)
         if not task_dir.exists():
             raise FileNotFoundError(f"Task not found: {task_id}")
-        self._cancelled_task_ids.discard(task_id)
-        # No in-process lock dict to clean up — locking is provided by
-        # file_lock's per-path sidecar files, which are removed with the tree.
+        # Mark as cancelled first so any running worker in another process
+        # stops writing before we delete the directory.
+        try:
+            metadata = self._load_task(task_id)
+            status = str(metadata.get("status") or "").strip().lower()
+            if status in {"processing", "queued"}:
+                self._mark_task_cancelled(task_id)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            pass  # Task may already be gone; still attempt deletion.
         self._delete_tree(task_dir)
 
     def stop_all_tasks(self) -> dict[str, Any]:
         cancelled_task_ids: list[str] = []
         for metadata_path in self._tasks_root().glob("*/task.json"):
             task_id = metadata_path.parent.name
+            meta_path = self._task_meta_path(task_id)
             try:
-                metadata = self._load_task(task_id)
-                status = str(metadata.get("status") or "").strip().lower()
-                if not task_id or status not in {"processing", "queued"}:
-                    continue
-                self._cancelled_task_ids.add(task_id)
-                metadata["status"] = "cancelled"
-                metadata["stage"] = "cancelled"
-                metadata["last_error"] = "Task cancelled by user."
-                metadata["last_activity_at"] = time.time()
-                self._save_task(task_id, metadata)
-                cancelled_task_ids.append(task_id)
+                # Hold the task.json file_lock across the entire
+                # read-modify-write so another process/thread cannot race
+                # between the status check and the cancelled-state save.
+                with file_lock(meta_path):
+                    metadata = self._load_task(task_id)  # re-entrant lock
+                    status = str(metadata.get("status") or "").strip().lower()
+                    if not task_id or status not in {"processing", "queued"}:
+                        continue
+                    # File-based cross-process cancellation marker.
+                    self._mark_task_cancelled(task_id)
+                    metadata["status"] = "cancelled"
+                    metadata["stage"] = "cancelled"
+                    metadata["last_error"] = "Task cancelled by user."
+                    metadata["last_activity_at"] = time.time()
+                    self._save_task(task_id, metadata)  # re-entrant lock
+                    cancelled_task_ids.append(task_id)
             except (json.JSONDecodeError, OSError, FileNotFoundError) as exc:
                 logger.warning("stop_task_meta_skipped", task_id=task_id, error=str(exc))
                 continue
