@@ -194,6 +194,21 @@ The LLM/CAD runtime configuration (stored in `~/.config/cli-anything-cad/config.
 ### Known limitations in multi-process mode
 
 - Cross-process file locks protect task metadata and config writes.
+- **Per-task lifecycle + global creation/clear coordination locks**: each task
+  has a stable lifecycle lock file in `outputs/cad_task_lifecycle/{task_id}.lifecycle`
+  (a sibling of `cad_tasks/`, never removed by delete/clear so lock identity —
+  the inode — stays constant across processes). Writers (`_save_task` /
+  `_update_task` / `_append_log` / `_save_checkpoint`) and deleters
+  (`delete_task` / `clear_all_tasks`) hold this per-task lock for their whole
+  exists→lock→write/delete sequence, closing delete-vs-writer TOCTOU. A single
+  **global** coordination lock
+  (`outputs/cad_task_lifecycle/_task_create_or_clear.coord`) additionally
+  serializes the *registration* critical region of `extract_upload`
+  (mkdir → upload → convert/extract → first `task.json`) with the *whole*
+  `clear_all_tasks` (cancel-marking + enumeration/deletion + marker cleanup), so
+  a task created concurrently with a clear can neither escape the clear nor be
+  deleted while it is being written. Normal per-task processing (translation)
+  uses only per-task locks and is not serialized by the global lock.
 - **Cross-process cancellation is file-based**: stop/cancel operations write a `.cancel` marker in a **stable external directory** (`outputs/cad_cancel_marks/`), never inside the task directory. Any worker process running a task checks the marker before/after each chunk and aborts cleanly. The marker is removed when the task reaches a terminal state. Because markers live outside task directories, `delete_task` / `clear_all_tasks` never race with a running worker's cleanup path to recreate the task directory.
 - **Config snapshot per task**: each task stores a sanitized snapshot of the effective LLM/CAD runtime config in `task.json` at creation time. The actual LLM translation calls use the frozen `llm` section from this snapshot via a thread-local context manager (`LLMTranslationService.frozen_config`), so a mid-flight global config change cannot alter a task's actual provider/model/batch_size/parameters. API keys are resolved live at call time (not stored in the snapshot).
 - LLM rate-limit buckets are per-process. Under multi-worker Celery, RPM/TPM quotas may be exceeded by the aggregate of all workers.

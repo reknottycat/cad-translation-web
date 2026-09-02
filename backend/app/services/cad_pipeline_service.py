@@ -104,6 +104,62 @@ class CADPipelineService:
         # are the only things removed by delete/clear.
         return
 
+    # --- Global task-root creation/clear coordination lock ---
+    # ``extract_upload`` (task creation) and ``clear_all_tasks`` are both
+    # *mutators of the set of task directories under ``cad_tasks/``*.  The
+    # per-task lifecycle locks alone cannot coordinate these two:
+    #
+    #   * ``extract_upload`` calls ``task_dir.mkdir()`` and writes the upload /
+    #     converted / extracted artifacts *before* the task is ever visible to
+    #     ``clear_all_tasks`` (its first ``_save_task``), so a clear running
+    #     concurrently has no per-task lock to wait on for that brand-new id;
+    #   * ``clear_all_tasks`` enumerates task dirs, deletes each under its
+    #     per-task lock, then cleans up external cancel markers.  A task that
+    #     is mid-creation when the clear enumerates would escape (or, worse,
+    #     keep writing into a directory the clear deletes underneath it).
+    #
+    # To close this gap we add one **global** coordination lock that serializes
+    # the entire *task-registration* critical region of ``extract_upload``
+    # (mkdir through the first ``_save_task``) with the whole
+    # ``clear_all_tasks`` operation (cancel-marking + enumeration + deletion +
+    # marker cleanup).  The lock lives on a stable file under the stable
+    # ``cad_task_lifecycle/`` root, so it is never removed by clear/delete and
+    # its identity (inode) stays constant across processes.
+    #
+    # Important: this global lock is held only while *creating* a task or
+    # *clearing* all tasks.  Normal per-task processing (``_save_task`` /
+    # ``_update_task`` / ``_append_log`` / ``_save_checkpoint`` /
+    # ``_load_task``) does **not** take this lock — it continues to use only
+    # the per-task lifecycle lock, so distinct tasks still translate / run in
+    # parallel.  The global lock only serializes the brief registration step
+    # of a new upload against a full clear, which is exactly the invariant the
+    # reviewer requested and does not block parallel processing of tasks that
+    # already exist.
+    def _global_coord_lock_path(self) -> Path:
+        """Stable global coordination lock file (in lifecycle root)."""
+        return self._lifecycle_root() / "_task_create_or_clear.coord"
+
+    @contextlib.contextmanager
+    def _task_create_or_clear_lock(self) -> Iterator[None]:
+        """Hold the global task-creation/clear coordination lock.
+
+        Mutual exclusion between the *registration* of a new task
+        (``extract_upload`` critical region) and ``clear_all_tasks``.  This
+        guarantees that:
+
+          1. A task whose creation begins before a clear is fully registered
+             (directory + task.json present) before the clear may proceed, so
+             it can never escape a clear that started after it nor be deleted
+             mid-creation;
+          2. A clear that begins first completes (deletes every existing task
+             and cleans every cancel marker) before any new task creation may
+             start, so no upload writes into a directory being cleared and no
+             newly created task's marker is swept by the clear's Phase 3.
+        """
+        lock_path = self._global_coord_lock_path()
+        with file_lock(lock_path):
+            yield
+
     # --- Cross-process cancellation markers (file-based) ---
     # Each task directory may contain a `.cancel` marker file. Any worker
     # process can request cancellation by creating this file. A worker running
@@ -748,12 +804,60 @@ class CADPipelineService:
         suffix = Path(uploaded_file.filename).suffix.lower()
         if suffix not in {".dwg", ".dxf"}:
             raise ValueError("Only DWG and DXF files are supported.")
-
-        task_id = uuid.uuid4().hex[:8]
-        task_dir = self._task_dir(task_id)
-        task_dir.mkdir(parents=True, exist_ok=True)
-
         safe_filename = get_safe_filename(uploaded_file.filename)
+
+        # The whole "task registration" critical region — allocate a task id,
+        # create the task directory, write the upload, run DWG conversion /
+        # DXF text extraction into that directory, and persist the first
+        # task.json — runs under the **global creation/clear coordination
+        # lock**.  A concurrent ``clear_all_tasks`` therefore cannot interleave
+        # between the directory creation and the first ``_save_task``: either
+        # the new task is fully registered before the clear proceeds (so it is
+        # enumerated and deleted along with everyone else), or the clear runs
+        # first and this upload only starts afterward (never writing into a
+        # directory the clear deletes underneath it, never leaving an orphan).
+        #
+        # If registration fails partway (upload / convert / extract / save),
+        # we clean up the half-created task directory and any external cancel
+        # marker *under the same lock* so a failed upload never leaves an
+        # orphan directory or marker behind and never re-creates one.
+        with self._task_create_or_clear_lock():
+            task_id = uuid.uuid4().hex[:8]
+            task_dir = self._task_dir(task_id)
+            task_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                return self._register_uploaded_task(
+                    task_id=task_id,
+                    uploaded_file=uploaded_file,
+                    suffix=suffix,
+                    target_language=target_language,
+                    converter_backend=converter_backend,
+                    safe_filename=safe_filename,
+                    started_at=started_at,
+                )
+            except BaseException:
+                # Registration failed: reclaim the half-created task dir and
+                # its external cancel marker so no orphan is left behind.
+                self._abandon_partial_task(task_id)
+                raise
+
+    def _register_uploaded_task(
+        self,
+        task_id: str,
+        uploaded_file: UploadFile,
+        suffix: str,
+        target_language: str,
+        converter_backend: str | None,
+        safe_filename: str,
+        started_at: float,
+    ) -> dict[str, Any]:
+        """Perform upload → DWG-convert → extract → first ``_save_task``.
+
+        Caller holds the global creation/clear coordination lock, so this task
+        directory cannot be concurrently cleared/reaped while it is being
+        populated.
+        """
+        task_dir = self._task_dir(task_id)
         input_path = task_dir / safe_filename
         with input_path.open("wb") as buffer:
             shutil.copyfileobj(uploaded_file.file, buffer)
@@ -834,6 +938,27 @@ class CADPipelineService:
             "excel_file_url": f"/api/cad/download/{task_id}/excel" if excel_filename else None,
             "texts": texts,
         }
+
+    def _abandon_partial_task(self, task_id: str) -> None:
+        """Clean up a task directory left half-created by a failed upload.
+
+        Called *while holding* the global creation/clear coordination lock, so
+        no concurrent clear or creation touches the same ids.  It removes only
+        the given task's own directory tree and its external cancel marker —
+        never other tasks' data — and never re-creates orphan files.
+        """
+        if not task_id:
+            return
+        task_dir = self._task_dir(task_id)
+        try:
+            if task_dir.exists():
+                self._delete_tree(task_dir)
+        except OSError:
+            pass
+        try:
+            self._clear_task_cancel(task_id)
+        except OSError:
+            pass
 
     def _run_translation_with_logging(
         self,
@@ -1602,68 +1727,91 @@ class CADPipelineService:
         would split lock identity (two different lock objects protecting the
         same task), which is why no ``*.lifecycle`` / ``*.lifecycle.lock`` file
         is ever deleted here.
+
+        The *entire* operation — Phase 1 cancel-marking, Phase 2
+        enumeration/deletion, and Phase 3 marker cleanup — runs under the
+        **global creation/clear coordination lock** shared with
+        ``extract_upload``.  This closes the remaining concurrency gap where a
+        task created concurrently with a clear could escape the clear's
+        enumeration (its ``task_dir.mkdir()`` happened after Phase 2's snapshot)
+        or an in-flight upload could keep writing into a directory the clear was
+        deleting.  Because creation and clear are mutually exclusive:
+
+          * if a task's upload already holds the coordination lock, this clear
+            waits until that task is fully registered, then deletes it with the
+            rest (no task escapes the clear);
+          * if this clear already holds the lock, no new upload may start until
+            every task directory is removed and every cancel marker is cleaned,
+            so no upload writes into a cleared directory and no newly created
+            task's marker is swept by Phase 3.
+
+        Parallel processing of already-registered tasks (translation etc.) uses
+        only per-task lifecycle locks and is *not* serialized by this clear.
         """
-        tasks_root = self._tasks_root()
-        cancel_root = self._cancel_marks_root()
+        with self._task_create_or_clear_lock():
+            tasks_root = self._tasks_root()
+            cancel_root = self._cancel_marks_root()
 
-        # Phase 1: mark all currently-discoverable tasks as cancelled so any
-        # running worker stops writing before we delete.
-        if tasks_root.exists():
-            for metadata_path in tasks_root.glob("*/task.json"):
-                task_id = metadata_path.parent.name
-                try:
-                    self._mark_task_cancelled(task_id)
-                except OSError:
-                    pass  # Already deleted or locked by another process.
+            # Phase 1: mark all currently-discoverable tasks as cancelled so any
+            # running worker stops writing before we delete.
+            if tasks_root.exists():
+                for metadata_path in tasks_root.glob("*/task.json"):
+                    task_id = metadata_path.parent.name
+                    try:
+                        self._mark_task_cancelled(task_id)
+                    except OSError:
+                        pass  # Already deleted or locked by another process.
 
-        # Phase 2: remove each task directory *while holding* its per-task
-        # lifecycle lock.  Enumerate by directory name (not just `*/task.json`)
-        # so partial / mid-creation task directories are also reclaimed under
-        # their lock.  A writer in another process that holds (or is waiting
-        # for) the same lifecycle lock is thereby serialized with the delete —
-        # it either finishes writing before we delete, or acquires the lock
-        # after the directory is already gone and skips (task_dir.exists()==False).
-        if tasks_root.exists():
-            task_ids = sorted(
-                child.name for child in tasks_root.iterdir() if child.is_dir()
-            )
-            for task_id in task_ids:
-                task_dir = self._tasks_root() / task_id
-                try:
-                    with self._task_lifecycle_lock(task_id):
-                        # Re-mark under the lock (covers partial tasks) so a
-                        # mid-flight worker still sees cancellation even if it
-                        # only grabs the lock after we release it.
-                        try:
-                            self._mark_task_cancelled(task_id)
-                        except OSError:
-                            pass
-                        if task_dir.exists():
-                            self._delete_tree(task_dir)
-                except (OSError, FileNotFoundError):
-                    pass  # Task already gone or lifecycle dir unavailable.
+            # Phase 2: remove each task directory *while holding* its per-task
+            # lifecycle lock.  Enumerate by directory name (not just `*/task.json`)
+            # so partial / mid-creation task directories are also reclaimed under
+            # their lock.  A writer in another process that holds (or is waiting
+            # for) the same lifecycle lock is thereby serialized with the delete —
+            # it either finishes writing before we delete, or acquires the lock
+            # after the directory is already gone and skips (task_dir.exists()==False).
+            if tasks_root.exists():
+                task_ids = sorted(
+                    child.name for child in tasks_root.iterdir() if child.is_dir()
+                )
+                for task_id in task_ids:
+                    task_dir = self._tasks_root() / task_id
+                    try:
+                        with self._task_lifecycle_lock(task_id):
+                            # Re-mark under the lock (covers partial tasks) so a
+                            # mid-flight worker still sees cancellation even if it
+                            # only grabs the lock after we release it.
+                            try:
+                                self._mark_task_cancelled(task_id)
+                            except OSError:
+                                pass
+                            if task_dir.exists():
+                                self._delete_tree(task_dir)
+                    except (OSError, FileNotFoundError):
+                        pass  # Task already gone or lifecycle dir unavailable.
 
-        # Remove any leftover stray non-directory files (e.g. interrupted
-        # atomic-write temp files) in the root; task directories were already
-        # removed above under their lifecycle locks.
-        if tasks_root.exists():
-            for child in list(tasks_root.iterdir()):
-                try:
-                    if not child.is_dir():
-                        child.unlink(missing_ok=True)
-                except OSError:
-                    pass
-        # Recreate the root directory to ensure it exists for future tasks.
-        tasks_root.mkdir(parents=True, exist_ok=True)
+            # Remove any leftover stray non-directory files (e.g. interrupted
+            # atomic-write temp files) in the root; task directories were already
+            # removed above under their lifecycle locks.
+            if tasks_root.exists():
+                for child in list(tasks_root.iterdir()):
+                    try:
+                        if not child.is_dir():
+                            child.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+            # Recreate the root directory to ensure it exists for future tasks.
+            tasks_root.mkdir(parents=True, exist_ok=True)
 
-        # Phase 3: clean up all external cancellation markers now that all task
-        # directories are gone and any worker has observed the deletion.
-        if cancel_root.exists():
-            for marker in cancel_root.glob("*.cancel"):
-                try:
-                    marker.unlink(missing_ok=True)
-                except OSError:
-                    pass
+            # Phase 3: clean up all external cancellation markers now that all task
+            # directories are gone and any worker has observed the deletion.  No
+            # new task can be created concurrently (we hold the coordination lock),
+            # so this never sweeps a freshly-created task's marker.
+            if cancel_root.exists():
+                for marker in cancel_root.glob("*.cancel"):
+                    try:
+                        marker.unlink(missing_ok=True)
+                    except OSError:
+                        pass
 
     def delete_task(self, task_id: str) -> None:
         task_dir = self._task_dir(task_id)
