@@ -9,7 +9,7 @@ import time
 import uuid
 import zipfile
 from pathlib import Path
-from tempfile import mkstemp
+from tempfile import mkdtemp, mkstemp
 from typing import Any, Callable, Iterator
 
 import structlog
@@ -184,6 +184,22 @@ class CADPipelineService:
     def _cancel_marker_path(self, task_id: str) -> Path:
         """Return the external cancellation marker for ``task_id``."""
         return self._cancel_marks_root() / f"{task_id}.cancel"
+
+    def _docutranslate_work_root(self) -> Path:
+        """Stable sibling directory for per-run DocuTranslate working artifacts.
+
+        ``delete_task`` / ``clear_all_tasks`` only ever remove task directories
+        under ``cad_tasks/`` and external cancel markers under
+        ``cad_cancel_marks/``.  DocuTranslate's intermediate JSON artifacts
+        (``cad_records.json`` / translated JSON) are written here — *outside*
+        the task tree — so a running worker can never recreate a deleted task
+        directory by writing its working files.  The ``cad_work/`` root is
+        never removed by delete/clear; each per-run staging subdirectory is
+        removed by the worker in a ``finally`` block after translation.
+        """
+        root = self.settings.get_output_path() / "cad_work" / "docutranslate"
+        root.mkdir(parents=True, exist_ok=True)
+        return root
 
     def _is_task_cancelled(self, task_id: str) -> bool:
         """Cross-process cancellation check.
@@ -1114,7 +1130,27 @@ class CADPipelineService:
         ensure_not_cancelled: Callable[[], None],
         record_ids: list[str] | None = None,
     ) -> list[dict[str, str]]:
-        working_dir = self._task_dir(task_id) / "docutranslate"
+        # DocuTranslate writes intermediate JSON artifacts (cad_records.json /
+        # translated JSON) into its ``working_dir``.  These are *purely
+        # intermediate* — the method consumes them in-memory to build
+        # ``translations``, then persists only the lifecycle-locked checkpoint.
+        #
+        # Historically the working_dir was ``<task_dir>/docutranslate``, and the
+        # adapter unconditionally ``mkdir(parents=True, exist_ok=True)`` there.
+        # ``process_upload`` / ``resume_task`` hold no per-task lifecycle lock
+        # between ``ensure_not_cancelled()`` and that write, so
+        # ``delete_task`` / ``clear_all_tasks`` could remove ``task_dir`` first
+        # and the still-running worker would then *re-create* the deleted task
+        # directory (plus orphan ``docutranslate`` files) by its mkdir/write.
+        #
+        # Fix: run DocuTranslate in a per-run staging directory *outside* the
+        # task tree (``outputs/cad_work/docutranslate``), which delete/clear
+        # never remove.  A worker therefore can never recreate a deleted
+        # task_dir by writing DocuTranslate artifacts.  All task-dir products
+        # (task.json / task.log / checkpoint) are still written through the
+        # existing lifecycle-locked helpers (``_save_checkpoint`` /
+        # ``_update_task`` / ``_append_log``) that skip when the task dir is
+        # gone — so nothing is recreated after deletion.
         adapter = self._build_docutranslate_adapter(runtime, target_language)
         effective_record_ids = record_ids or [f"{task_id}_{index}" for index in range(len(original_texts))]
         records = [
@@ -1125,7 +1161,7 @@ class CADPipelineService:
 
         self._append_log(
             task_id,
-            f"开始翻译: {len(records)} 条文本, 执行路径=DocuTranslate, 工作目录={working_dir.name}",
+            f"开始翻译: {len(records)} 条文本, 执行路径=DocuTranslate (外部临时工作区)",
         )
         self._update_task(
             task_id,
@@ -1143,48 +1179,59 @@ class CADPipelineService:
         )
 
         ensure_not_cancelled()
-        batch_result = adapter.translate_records(records, working_dir=working_dir)
-        ensure_not_cancelled()
 
-        translated_by_id = {
-            record.record_id: str(record.translated_text or "").strip()
-            for record in batch_result.records
-        }
+        # Staging dir is external to the task tree, so delete/clear cannot
+        # race it and no deleted task_dir is recreated.
+        staging_dir = Path(mkdtemp(prefix=f"{task_id}_", dir=str(self._docutranslate_work_root())))
+        try:
+            batch_result = adapter.translate_records(records, working_dir=staging_dir)
+            ensure_not_cancelled()
 
-        translations: list[dict[str, str]] = []
-        failed_count = 0
-        for record in records:
-            translated = translated_by_id.get(record.record_id, "")
-            item = {
-                "record_id": record.record_id,
-                "original": record.source_text,
-                "translated": translated,
+            translated_by_id = {
+                record.record_id: str(record.translated_text or "").strip()
+                for record in batch_result.records
             }
-            translations.append(item)
-            if not translated:
-                failed_count += 1
 
-        self._save_checkpoint(task_id, translations)
-        successful = len(translations) - failed_count
-        self._update_task(
-            task_id,
-            status="processing",
-            stage="translating",
-            provider="docutranslate",
-            model=runtime.get("model", ""),
-            batch_size=batch_size,
-            retry_count=int(runtime.get("retry_count") or 0),
-            total_chunks=total_chunks,
-            completed_chunks=total_chunks,
-            current_chunk=total_chunks,
-            translated_count=successful,
-            last_error="",
-        )
-        self._append_log(
-            task_id,
-            f"DocuTranslate 翻译完成: {successful} 条成功, {failed_count} 条失败, artifacts={batch_result.translated_json_path.name}",
-        )
-        return translations
+            translations: list[dict[str, str]] = []
+            failed_count = 0
+            for record in records:
+                translated = translated_by_id.get(record.record_id, "")
+                item = {
+                    "record_id": record.record_id,
+                    "original": record.source_text,
+                    "translated": translated,
+                }
+                translations.append(item)
+                if not translated:
+                    failed_count += 1
+
+            # Lifecycle-protected checkpoint write: a no-op when the task was
+            # deleted concurrently, so no orphan checkpoint is recreated.
+            self._save_checkpoint(task_id, translations)
+            successful = len(translations) - failed_count
+            self._update_task(
+                task_id,
+                status="processing",
+                stage="translating",
+                provider="docutranslate",
+                model=runtime.get("model", ""),
+                batch_size=batch_size,
+                retry_count=int(runtime.get("retry_count") or 0),
+                total_chunks=total_chunks,
+                completed_chunks=total_chunks,
+                current_chunk=total_chunks,
+                translated_count=successful,
+                last_error="",
+            )
+            self._append_log(
+                task_id,
+                f"DocuTranslate 翻译完成: {successful} 条成功, {failed_count} 条失败, "
+                f"artifacts={batch_result.translated_json_path.name}",
+            )
+            return translations
+        finally:
+            # Best-effort cleanup of the external per-run staging directory.
+            shutil.rmtree(staging_dir, ignore_errors=True)
 
     def process_upload(
         self,
@@ -1636,46 +1683,64 @@ class CADPipelineService:
             translation_mode:    "replace" 替换原文 | "add" 在下方追加翻译（默认 "replace"）
             font_name:           输出字体名称（默认使用配置中的 DEFAULT_FONT_NAME）
             font_size_reduction: 字号缩小量（默认 2）
+
+        Concurrency: the entire write of the translated DXF / translated Excel
+        outputs and the metadata write-back happens while holding the per-task
+        lifecycle lock.  After confirming the task directory still exists, no
+        ``delete_task`` / ``clear_all_tasks`` can interleave (they must acquire
+        the *same* lifecycle lock to remove the directory), so a deleted task
+        directory is never re-created by a half-finished apply and no orphaned
+        half-written DXF/Excel can survive a delete.  ``_update_task`` /
+        ``_save_task`` / ``_write_translated_excel`` acquire the same lifecycle
+        lock re-entrantly (file_lock is a per-thread RLock), so no deadlock.
         """
-        metadata = self._load_task(task_id)
-        task_dir = self._task_dir(task_id)
-        normalized_dxf_path = task_dir / metadata["normalized_dxf_filename"]
-        if not normalized_dxf_path.exists():
-            raise FileNotFoundError(f"Normalized DXF is missing for task {task_id}")
+        with self._task_lifecycle_lock(task_id):
+            task_dir = self._task_dir(task_id)
+            meta_path = self._task_meta_path(task_id)
+            if not task_dir.exists() or not meta_path.exists():
+                # Task deleted/cleared concurrently while we waited for the lock:
+                # do not write any output into (or re-create) its directory.
+                raise TaskCancelledError("Task deleted while applying translation.")
 
-        translation_map: dict[str, str] = {}
-        for item in translations:
-            original = (item.get("original") or "").strip()
-            translated = (item.get("translated") or "").strip()
-            if original and translated:
-                translation_map[original] = translated
+            metadata = self._load_task(task_id)  # nested file_lock, re-entrant
+            normalized_dxf_path = task_dir / metadata["normalized_dxf_filename"]
+            if not normalized_dxf_path.exists():
+                raise FileNotFoundError(f"Normalized DXF is missing for task {task_id}")
 
-        if not translation_map:
-            raise ValueError("No non-empty translations were provided.")
+            translation_map: dict[str, str] = {}
+            for item in translations:
+                original = (item.get("original") or "").strip()
+                translated = (item.get("translated") or "").strip()
+                if original and translated:
+                    translation_map[original] = translated
 
-        resolved_font = font_name or self.settings.DEFAULT_FONT_NAME
-        translated_filename = f"translated_{normalized_dxf_path.name}"
-        translated_output = task_dir / translated_filename
+            if not translation_map:
+                raise ValueError("No non-empty translations were provided.")
 
-        # 使用新的 TextApplier 功能模块（通过 pipeline 调用）
-        self._pipeline.run_apply_only(
-            dxf_file=str(normalized_dxf_path),
-            task_dir=str(task_dir),
-            translation_map=translation_map,
-            translation_mode=translation_mode,
-            font_name=resolved_font,
-            font_size_reduction=font_size_reduction,
-        )
-        translated_excel_path = self._write_translated_excel(task_id, translation_map)
+            resolved_font = font_name or self.settings.DEFAULT_FONT_NAME
+            translated_filename = f"translated_{normalized_dxf_path.name}"
 
-        metadata["translation_count"] = len(translation_map)
-        metadata["translated_count"] = len(translation_map)
-        metadata["translated_cad_filename"] = translated_filename
-        metadata["translated_excel_filename"] = translated_excel_path.name
-        metadata["translation_mode"] = translation_mode
-        metadata["font_name"] = resolved_font
-        metadata["font_size_reduction"] = font_size_reduction
-        self._save_task(task_id, metadata)
+            # 使用新的 TextApplier 功能模块（通过 pipeline 调用）写入 translated DXF
+            # 输出到 task_dir —— 全程持有 per-task lifecycle lock。
+            self._pipeline.run_apply_only(
+                dxf_file=str(normalized_dxf_path),
+                task_dir=str(task_dir),
+                translation_map=translation_map,
+                translation_mode=translation_mode,
+                font_name=resolved_font,
+                font_size_reduction=font_size_reduction,
+            )
+            # 写 translated Excel 输出到 task_dir（同样在 lifecycle lock 内）。
+            translated_excel_path = self._write_translated_excel(task_id, translation_map)
+
+            metadata["translation_count"] = len(translation_map)
+            metadata["translated_count"] = len(translation_map)
+            metadata["translated_cad_filename"] = translated_filename
+            metadata["translated_excel_filename"] = translated_excel_path.name
+            metadata["translation_mode"] = translation_mode
+            metadata["font_name"] = resolved_font
+            metadata["font_size_reduction"] = font_size_reduction
+            self._save_task(task_id, metadata)  # nested lifecycle+file_lock
 
         return {
             "task_id": task_id,
