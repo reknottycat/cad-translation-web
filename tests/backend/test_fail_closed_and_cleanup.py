@@ -418,7 +418,7 @@ def test_translate_batch_uses_frozen_config_for_rate_limit_and_params():
             "provider": "custom",
             "format": "openai_compatible",
             "base_url": "http://localhost:1/v1",  # never reachable
-            "api_key": "test-key",
+            "api_key": "",  # empty → allow_demo_fallback kicks in
             "model": "frozen-model",
         },
         "batch_size": 1,  # Force small batches
