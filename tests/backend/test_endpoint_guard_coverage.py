@@ -201,16 +201,16 @@ def test_task_list_logs_download_require_auth(guard_client):
 
     # Without token → rejected
     assert client.get("/api/cad/tasks").status_code == 403
-    assert client.get("/api/cad/tasks/fake-task/logs").status_code == 403
-    assert client.get("/api/cad/download/fake-task/excel").status_code == 403
+    assert client.get("/api/cad/tasks/cafebabe/logs").status_code == 403
+    assert client.get("/api/cad/download/cafebabe/excel").status_code == 403
 
     # With valid token → access attempted (may 404 since no task exists)
     headers = {"X-Admin-Token": "admin-token-identity-1"}
     assert client.get("/api/cad/tasks", headers=headers).status_code == 200
-    # fake task: should 404 (authenticated but not found), not 403
-    resp = client.get("/api/cad/tasks/fake-task/logs", headers=headers)
+    # well-formed but nonexistent id: 404 (authenticated but not found), not 403
+    resp = client.get("/api/cad/tasks/cafebabe/logs", headers=headers)
     assert resp.status_code in (200, 404, 500), f"Unexpected status: {resp.status_code}"
-    resp = client.get("/api/cad/download/fake-task/excel", headers=headers)
+    resp = client.get("/api/cad/download/cafebabe/excel", headers=headers)
     assert resp.status_code in (200, 404, 500), f"Unexpected status: {resp.status_code}"
 
 
@@ -277,20 +277,20 @@ def test_resume_apply_translation_require_auth(guard_client):
     headers = {"X-Admin-Token": "admin-token-identity-1"}
 
     # Without token → 403
-    resp = client.post("/api/cad/tasks/fake-id/resume", json={"target_language": "en"})
+    resp = client.post("/api/cad/tasks/cafebabe/resume", json={"target_language": "en"})
     assert resp.status_code == 403
 
     resp = client.post("/api/cad/apply-translation", json={
-        "task_id": "fake-id",
+        "task_id": "cafebabe",
         "translations": [{"original": "x", "translated": "y"}],
     })
     assert resp.status_code == 403
 
     # With token → not 403 (may 404 since fake task doesn't exist)
-    resp = client.post("/api/cad/tasks/fake-id/resume", headers=headers,
+    resp = client.post("/api/cad/tasks/cafebabe/resume", headers=headers,
                        json={"target_language": "en"})
     assert resp.status_code != 403
 
     resp = client.post("/api/cad/apply-translation", headers=headers,
-                       json={"task_id": "fake-id", "translations": []})
+                       json={"task_id": "cafebabe", "translations": []})
     assert resp.status_code != 403

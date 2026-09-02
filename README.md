@@ -180,6 +180,17 @@ The system is designed to support multiple users processing CAD tasks concurrent
 - **Fail-closed behavior**: If `ENABLE_ADMIN_GUARD=true` but `ADMIN_API_TOKEN` is left empty, every guarded endpoint returns `503 Service Unavailable`. This prevents accidental open access when protection is intended but not properly configured. There is **no silent fail-open path**.
 - Only explicitly set `ENABLE_ADMIN_GUARD=false` to run all endpoints open (trusted-network single-user deployment). This is not recommended for shared environments.
 - A `task_id` / `project_id` / `file_id` alone is **not** an access credential — it only identifies a resource once the caller has passed the admin guard.
+- **Centralised `task_id` validation (path-traversal defence in depth)**: every
+  task endpoint and service method that accepts a `task_id` validates it against
+  the system-generated shape (8 lowercase hex chars, as produced by
+  `uuid4().hex[:8]`) **before** it is joined onto any filesystem path
+  (`outputs/cad_tasks/{task_id}/`, lifecycle locks, cancel markers). Values
+  containing `../`, `.` segments, path separators or any other non-hex text are
+  rejected with a `400` so a caller can never read, download, delete, backfill
+  or log a path *outside* the task tree. Admin-token authentication proves who
+  is calling, not that an id is path-safe, so this guard is independent of and
+  in addition to the admin guard. Download additionally keeps the existing
+  `resolve_within_directory` containment check.
 - Cross-tenant isolation would require adding a user authentication system (login, session/JWT, per-user ownership columns on projects/tasks/files, per-user data-scoped queries), which is **out of scope** for this codebase. To serve multiple independent tenants from one host, deploy one instance per tenant or place a reverse proxy / SSO in front of separate deployments.
 
 ### Global Runtime Configuration

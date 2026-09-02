@@ -9,7 +9,7 @@ from starlette.concurrency import run_in_threadpool
 from app.config import get_settings
 from app.services.alibaba_ai_translation_service import alibaba_ai_translation_service
 from app.services.runtime_config_service import runtime_config_service
-from app.services.cad_pipeline_service import TaskCancelledError, cad_pipeline_service
+from app.services.cad_pipeline_service import TaskCancelledError, cad_pipeline_service, validate_task_id
 from app.utils.file_utils import validate_file
 from app.security import require_admin_access
 
@@ -94,8 +94,10 @@ async def apply_translation_to_cad(request: dict):
     font_name = request.get("font_name") or None
     font_size_reduction = int(request.get("font_size_reduction", 2))
 
-    if not task_id:
-        raise HTTPException(status_code=400, detail="task_id is required")
+    try:
+        task_id = validate_task_id(task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if translation_mode not in ("replace", "add"):
         raise HTTPException(status_code=400, detail="translation_mode must be 'replace' or 'add'")
 
@@ -113,6 +115,8 @@ async def apply_translation_to_cad(request: dict):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TaskCancelledError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Apply translation failed: {exc}") from exc
 
@@ -165,6 +169,7 @@ async def upload_cad_file(
 @router.get("/download/{task_id}/{file_type}", dependencies=[Depends(require_admin_access)])
 async def download_file(task_id: str, file_type: str):
     try:
+        task_id = validate_task_id(task_id)
         file_path, media_type = cad_pipeline_service.resolve_download(task_id, file_type)
         return FileResponse(path=str(file_path), media_type=media_type, filename=file_path.name)
     except FileNotFoundError as exc:
@@ -179,6 +184,8 @@ async def download_file(task_id: str, file_type: str):
 async def download_package(request: dict):
     task_ids = request.get("task_ids", [])
     try:
+        for _tid in (task_ids or []):
+            validate_task_id(_tid)
         file_path, media_type = cad_pipeline_service.build_download_package(task_ids)
         return FileResponse(path=str(file_path), media_type=media_type, filename=file_path.name)
     except FileNotFoundError as exc:
@@ -219,6 +226,7 @@ async def clear_all_tasks():
 async def resume_task(task_id: str, request: dict):
     """Resume an interrupted or failed CAD task from its last checkpoint."""
     try:
+        task_id = validate_task_id(task_id)
         result = await run_in_threadpool(
             cad_pipeline_service.resume_task,
             task_id=task_id,
@@ -242,10 +250,13 @@ async def resume_task(task_id: str, request: dict):
 async def get_task_logs(task_id: str):
     """Get human-readable logs for a CAD task."""
     try:
+        task_id = validate_task_id(task_id)
         logs = await run_in_threadpool(cad_pipeline_service.get_task_logs, task_id)
         return JSONResponse({"success": True, "data": {"logs": logs}})
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Get logs failed: {exc}") from exc
 
@@ -253,10 +264,13 @@ async def get_task_logs(task_id: str):
 @router.delete("/tasks/{task_id}", dependencies=[Depends(require_admin_access)])
 async def delete_task(task_id: str):
     try:
+        task_id = validate_task_id(task_id)
         cad_pipeline_service.delete_task(task_id)
         return JSONResponse({"success": True, "message": f"task {task_id} deleted"})
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Delete task failed: {exc}") from exc
 
@@ -324,4 +338,8 @@ async def health_check():
 
 @router.put("/dictionary/{task_id}/update", dependencies=[Depends(require_admin_access)])
 async def update_dictionary_entry(task_id: str, request: dict):
+    try:
+        task_id = validate_task_id(task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"success": True, "message": "dictionary update acknowledged", "task_id": task_id, "request": request}
