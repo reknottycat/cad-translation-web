@@ -165,15 +165,32 @@ This project is licensed under the [MIT License](LICENSE).
 The system is designed to support multiple users processing CAD tasks concurrently on an internal Windows deployment. Key behaviors:
 
 - **Task isolation**: Each CAD task gets a unique UUID-based task ID and an isolated directory under `outputs/cad_tasks/{task_id}/`. Source files, Excel extractions, translated CAD files, and logs never mix across tasks.
-- **File locking**: Task metadata (`task.json`), translation checkpoints, and runtime config files are protected by atomic writes (temp + rename) and cross-process file locks (`fcntl`/`msvcrt`) to prevent corruption and lost updates under concurrent access.
+- **Cross-process file locking**: Task metadata (`task.json`), translation checkpoints, and runtime config files are protected by atomic writes (temp + rename) plus **cross-process file locks** using a stable sidecar `.lock` file. The lock is acquired on `<target>.lock`, which is never renamed or replaced, so the lock identity is stable even when the target file is atomically replaced inside the critical section. This works on both POSIX (`fcntl.flock`) and Windows (`msvcrt.locking`).
 - **SQLite concurrency**: A 30-second busy timeout is set so concurrent readers/writers wait instead of failing with "database is locked".
-- **Config file safety**: Concurrent saves to the runtime config JSON are serialized, preventing corruption or lost updates.
+- **Config file safety**: Concurrent saves to the runtime config JSON are serialized through the same file-lock mechanism, preventing corruption or lost updates.
 - **Excel output uniqueness**: The `/api/translation/excel` endpoint generates UUID-prefixed output filenames, preventing same-name uploads from overwriting each other's results.
 - **COM converter serialization**: DWG-to-DXF conversions via COM are limited to one at a time per process (`CAD_COM_CONCURRENCY` env var, default 1) to avoid COM instance races.
 - **LLM rate limiting**: RPM/TPM buckets are per-process. When deploying multiple workers, each process maintains its own rate-limit state; consider allocating limits accordingly.
 
+### Security & Authorization Model
+
+**Single-tenant model**: This system is designed as a single-tenant web application for internal deployment. It has **no per-user accounts** and does **not** attempt to provide multi-tenant data isolation between distinct users on the same instance.
+
+- When `ENABLE_ADMIN_GUARD=false` (default), all API endpoints are accessible to any client that can reach the server. This is appropriate for a trusted internal network deployment.
+- When `ENABLE_ADMIN_GUARD=true` and `ADMIN_API_TOKEN` is set, **all** task/project/file/config endpoints (not just destructive ones) require the admin token via `X-Admin-Token` or `Authorization: Bearer <token>` headers. A `task_id` alone does **not** grant access when the admin guard is enabled.
+- Cross-tenant isolation would require adding a user authentication system (login, session/JWT, per-user data scoping), which is explicitly **out of scope** for this codebase. If multiple independent tenants must share one server, a reverse-proxy or separate deployment per tenant is recommended.
+
+### Global Runtime Configuration
+
+The LLM/CAD runtime configuration (stored in `~/.config/cli-anything-cad/config.json`) is deliberately designed as **server-global configuration** shared by all users and tasks:
+
+- Updating the runtime config while translation or CAD tasks are in-flight **may affect** those tasks at their next config read.
+- Concurrent updates to the runtime config are protected by the same file-lock mechanism, so writes are serialized and JSON is never corrupted.
+- To isolate configuration per user, project, or task, modify the workflow engine to snapshot the effective config at task start. This is out of scope for the current codebase.
+
 ### Known limitations in multi-process mode
 
-- File locks provide cross-process protection for task metadata and config writes.
-- However, in-process `threading.Lock`-based task cancellation (`_cancelled_task_ids`) is not shared across processes. Stop/cancel operations affect the process that initiated them.
+- Cross-process file locks protect task metadata and config writes.
+- However, in-process task cancellation (`_cancelled_task_ids`) is not shared across processes. Stop/cancel operations affect the process that initiated them.
 - LLM rate-limit buckets are per-process. Under multi-worker Celery, RPM/TPM quotas may be exceeded by the aggregate of all workers.
+- `CADPipelineService` module exceeds the 800-line guideline; splitting into submodules is tracked as a follow-up task.

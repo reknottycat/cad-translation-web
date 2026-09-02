@@ -20,12 +20,13 @@ from ..database import get_db, Project, ProjectFile
 from ..config import get_settings
 from ..schemas.file import FileUploadResponse, FileListResponse, FileDetailResponse
 from ..utils.file_utils import validate_file, get_file_hash, ensure_directory, get_safe_filename
+from ..security import require_admin_access
 
 logger = structlog.get_logger(__name__)
 router = APIRouter()
 settings = get_settings()
 
-@router.post("/upload/{project_id}", response_model=List[FileUploadResponse])
+@router.post("/upload/{project_id}", response_model=List[FileUploadResponse], dependencies=[Depends(require_admin_access)])
 async def upload_files(
     project_id: int,
     files: List[UploadFile] = File(...),
@@ -159,7 +160,7 @@ async def upload_files(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"文件上传失败: {str(e)}")
 
-@router.get("/{project_id}", response_model=List[FileListResponse])
+@router.get("/{project_id}", response_model=List[FileListResponse], dependencies=[Depends(require_admin_access)])
 async def list_project_files(
     project_id: int,
     db: Session = Depends(get_db)
@@ -185,7 +186,7 @@ async def list_project_files(
         logger.error("获取项目文件列表失败", project_id=project_id, error=str(e))
         raise HTTPException(status_code=500, detail=f"获取文件列表失败: {str(e)}")
 
-@router.get("/detail/{file_id}", response_model=FileDetailResponse)
+@router.get("/detail/{file_id}", response_model=FileDetailResponse, dependencies=[Depends(require_admin_access)])
 async def get_file_detail(
     file_id: int,
     db: Session = Depends(get_db)
@@ -207,7 +208,7 @@ async def get_file_detail(
         logger.error("获取文件详情失败", file_id=file_id, error=str(e))
         raise HTTPException(status_code=500, detail=f"获取文件详情失败: {str(e)}")
 
-@router.delete("/{file_id}")
+@router.delete("/{file_id}", dependencies=[Depends(require_admin_access)])
 async def delete_file(
     file_id: int,
     db: Session = Depends(get_db)
@@ -259,7 +260,7 @@ async def delete_file(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"删除文件失败: {str(e)}")
 
-@router.get("/download/{file_id}")
+@router.get("/download/{file_id}", dependencies=[Depends(require_admin_access)])
 async def download_file(
     file_id: int,
     file_type: str = "original",  # original, converted, excel, translated
@@ -309,7 +310,7 @@ async def download_file(
         logger.error("文件下载失败", file_id=file_id, error=str(e))
         raise HTTPException(status_code=500, detail=f"文件下载失败: {str(e)}")
 
-@router.post("/batch-download/{project_id}")
+@router.post("/batch-download/{project_id}", dependencies=[Depends(require_admin_access)])
 async def create_batch_download(
     project_id: int,
     file_type: str = "all",  # all, original, converted, excel, translated

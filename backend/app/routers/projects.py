@@ -26,7 +26,7 @@ logger = structlog.get_logger(__name__)
 router = APIRouter()
 settings = get_settings()
 
-@router.get("/summary")
+@router.get("/summary", dependencies=[Depends(require_admin_access)])
 async def get_projects_summary(db: Session = Depends(get_db)):
     """Overview payload for dashboard and projects center."""
     try:
@@ -160,7 +160,7 @@ async def get_projects_summary(db: Session = Depends(get_db)):
         logger.error("鑾峰彇椤圭洰姒傝澶辫触", error=str(e))
         raise HTTPException(status_code=500, detail=f"鑾峰彇椤圭洰姒傝澶辫触: {str(e)}")
 
-@router.post("/", response_model=ProjectResponse)
+@router.post("/", response_model=ProjectResponse, dependencies=[Depends(require_admin_access)])
 async def create_project(
     project: ProjectCreate,
     db: Session = Depends(get_db)
@@ -192,7 +192,7 @@ async def create_project(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"创建项目失败: {str(e)}")
 
-@router.get("/", response_model=List[ProjectListResponse])
+@router.get("/", response_model=List[ProjectListResponse], dependencies=[Depends(require_admin_access)])
 async def list_projects(
     skip: int = Query(0, ge=0, description="跳过的记录数"),
     limit: int = Query(20, ge=1, le=100, description="返回的记录数"),
@@ -217,7 +217,7 @@ async def list_projects(
         logger.error("获取项目列表失败", error=str(e))
         raise HTTPException(status_code=500, detail=f"获取项目列表失败: {str(e)}")
 
-@router.get("/{project_id}", response_model=ProjectDetailResponse)
+@router.get("/{project_id}", response_model=ProjectDetailResponse, dependencies=[Depends(require_admin_access)])
 async def get_project(
     project_id: int,
     db: Session = Depends(get_db)
@@ -250,7 +250,7 @@ async def get_project(
         logger.error("获取项目详情失败", project_id=project_id, error=str(e))
         raise HTTPException(status_code=500, detail=f"获取项目详情失败: {str(e)}")
 
-@router.put("/{project_id}", response_model=ProjectResponse)
+@router.put("/{project_id}", response_model=ProjectResponse, dependencies=[Depends(require_admin_access)])
 async def update_project(
     project_id: int,
     project_update: ProjectUpdate,
@@ -312,7 +312,7 @@ async def clear_all_data(db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"清空数据失败: {str(e)}")
 
 
-@router.delete("/{project_id}")
+@router.delete("/{project_id}", dependencies=[Depends(require_admin_access)])
 async def delete_project(
     project_id: int,
     db: Session = Depends(get_db)
@@ -339,7 +339,7 @@ async def delete_project(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"删除项目失败: {str(e)}")
 
-@router.post("/{project_id}/process")
+@router.post("/{project_id}/process", dependencies=[Depends(require_admin_access)])
 async def start_project_processing(
     project_id: int,
     db: Session = Depends(get_db)
@@ -405,7 +405,7 @@ async def start_project_processing(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"启动批量处理失败: {str(e)}")
 
-@router.get("/{project_id}/status")
+@router.get("/{project_id}/status", dependencies=[Depends(require_admin_access)])
 async def get_project_status(
     project_id: int,
     db: Session = Depends(get_db)
@@ -460,7 +460,7 @@ async def get_project_status(
         logger.error("获取项目处理状态失败", project_id=project_id, error=str(e))
         raise HTTPException(status_code=500, detail=f"获取项目状态失败: {str(e)}")
 
-@router.post("/{project_id}/cancel")
+@router.post("/{project_id}/cancel", dependencies=[Depends(require_admin_access)])
 async def cancel_project_processing(
     project_id: int,
     db: Session = Depends(get_db)

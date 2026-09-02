@@ -145,3 +145,51 @@ def test_concurrent_checkpoint_save_load(temp_dir):
             f.result(timeout=10)
 
     assert not errors, f"Errors: {errors}"
+
+
+def test_file_lock_uses_sidecar_not_target(temp_dir):
+    """file_lock locks a .lock sidecar file, NOT the target data file."""
+    from app.utils.locking import atomic_write_json, file_lock
+
+    target = temp_dir / "data.json"
+
+    with file_lock(target):
+        # Inside the lock, the sidecar should exist but target should NOT
+        # be created by the lock itself
+        lock_file = Path(str(target) + ".lock")
+        assert lock_file.exists()
+
+    # After the lock context exits, sidecar may still exist
+    lock_file = Path(str(target) + ".lock")
+    if lock_file.exists():
+        # It should be a valid empty file
+        assert lock_file.stat().st_size == 0 or lock_file.read_text() == ""
+
+
+def test_file_lock_preserves_identity_across_atomic_replace(temp_dir):
+    """Lock identity must not change when target is atomically replaced.
+
+    This is the critical fix: the lock is on a sidecar .lock file, not on
+    the target file that gets replaced by os.replace inside the critical section.
+    """
+    import os as _os
+    from app.utils.locking import atomic_write_json, file_lock
+
+    target = temp_dir / "data.json"
+
+    # Pre-create sidecar and record its inode
+    lock_file = Path(str(target) + ".lock")
+    lock_file.touch()
+    initial_ino = lock_file.stat().st_ino
+
+    # Atomic replace the target inside the lock
+    with file_lock(target):
+        atomic_write_json(target, {"data": "v1"})
+
+    # The lock sidecar must still exist with the same inode
+    assert lock_file.exists()
+    assert lock_file.stat().st_ino == initial_ino
+
+    # Target was successfully written
+    result = json.loads(target.read_text(encoding="utf-8"))
+    assert result == {"data": "v1"}

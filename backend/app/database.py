@@ -41,38 +41,40 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 # 创建基础模型类
 Base = declarative_base()
 
+
 class Project(Base):
     """项目模型"""
     __tablename__ = "projects"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), nullable=False, index=True)
     description = Column(Text, nullable=True)
     status = Column(String(50), default="created", index=True)  # created, processing, completed, failed
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-    
+
     # 配置信息
     source_language = Column(String(10), default="zh")
     target_language = Column(String(10), default="en")
     font_name = Column(String(100), default="Times New Roman")
     font_size_reduction = Column(Integer, default=4)
     translation_mode = Column(String(20), default="add")  # add, replace
-    
+
     # 统计信息
     total_files = Column(Integer, default=0)
     processed_files = Column(Integer, default=0)
     total_texts = Column(Integer, default=0)
     translated_texts = Column(Integer, default=0)
-    
+
     # 关联关系
     files = relationship("ProjectFile", back_populates="project", cascade="all, delete-orphan")
     tasks = relationship("ProcessingTask", back_populates="project", cascade="all, delete-orphan")
 
+
 class ProjectFile(Base):
     """项目文件模型"""
     __tablename__ = "project_files"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
     filename = Column(String(255), nullable=False)
@@ -83,23 +85,24 @@ class ProjectFile(Base):
     status = Column(String(50), default="uploaded")  # uploaded, converting, converted, extracting, extracted, translating, translated, failed
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-    
+
     # 处理结果路径
     converted_path = Column(String(500), nullable=True)  # DXF转换结果路径
     excel_path = Column(String(500), nullable=True)      # Excel提取结果路径
     translated_path = Column(String(500), nullable=True) # 翻译回填结果路径
-    
+
     # 统计信息
     extracted_texts_count = Column(Integer, default=0)
     translated_texts_count = Column(Integer, default=0)
-    
+
     # 关联关系
     project = relationship("Project", back_populates="files")
+
 
 class ProcessingTask(Base):
     """处理任务模型"""
     __tablename__ = "processing_tasks"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
     task_id = Column(String(255), unique=True, index=True)  # Celery任务ID
@@ -110,19 +113,20 @@ class ProcessingTask(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     started_at = Column(DateTime(timezone=True), nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)
-    
+
     # 任务详情
     message = Column(Text, nullable=True)
     error_message = Column(Text, nullable=True)
     result_data = Column(Text, nullable=True)  # JSON格式的结果数据
-    
+
     # 关联关系
     project = relationship("Project", back_populates="tasks")
+
 
 class TextExtraction(Base):
     """文本提取记录模型"""
     __tablename__ = "text_extractions"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
     file_id = Column(Integer, ForeignKey("project_files.id"), nullable=False)
@@ -137,10 +141,11 @@ class TextExtraction(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
+
 class TranslationCache(Base):
     """翻译缓存模型"""
     __tablename__ = "translation_cache"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     source_text = Column(Text, nullable=False, index=True)
     translated_text = Column(Text, nullable=False)
@@ -150,6 +155,7 @@ class TranslationCache(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     last_used_at = Column(DateTime(timezone=True), server_default=func.now())
     usage_count = Column(Integer, default=1)
+
 
 # 数据库依赖注入
 def get_db() -> Generator[Session, None, None]:
@@ -164,12 +170,14 @@ def get_db() -> Generator[Session, None, None]:
     finally:
         db.close()
 
+
 # 数据库初始化函数
 def init_db():
     """初始化数据库"""
     logger.info("初始化数据库表")
     Base.metadata.create_all(bind=engine)
     logger.info("数据库表创建完成")
+
 
 # 数据库健康检查
 def check_db_health() -> bool:

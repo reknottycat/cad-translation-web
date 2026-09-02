@@ -4,7 +4,6 @@ import json
 import os
 import stat
 import shutil
-import threading
 import time
 import uuid
 import zipfile
@@ -41,9 +40,8 @@ class CADPipelineService:
         self._cancelled_task_ids: set[str] = set()
         # 使用模块化工作流管道处理新任务
         self._pipeline = get_pipeline()
-        # 每个 task_id 的元数据读-改-写锁，防止并发更新互相覆盖
-        self._task_meta_locks: dict[str, threading.Lock] = {}
-        self._task_meta_locks_guard = threading.Lock()
+        # 注意：跨进程锁由 locking.file_lock 通过旁车 .lock 文件提供。
+        # 该文件锁同时保护同进程内多线程访问（内部含 RLock）。
 
     def _tasks_root(self) -> Path:
         tasks_root = self.settings.get_output_path() / "cad_tasks"
@@ -113,14 +111,16 @@ class CADPipelineService:
     def _save_checkpoint(self, task_id: str, translations: list[dict[str, str]]) -> None:
         checkpoint_path = self._task_checkpoint_path(task_id)
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._task_meta_lock(task_id):
+        # Cross-process + in-process lock on the checkpoint file's sidecar.
+        with file_lock(checkpoint_path):
             atomic_write_json(checkpoint_path, translations)
 
     def _load_checkpoint(self, task_id: str) -> list[dict[str, str]]:
         checkpoint_path = self._task_checkpoint_path(task_id)
         if not checkpoint_path.exists():
             return []
-        with self._task_meta_lock(task_id):
+        # Cross-process + in-process lock on the checkpoint file's sidecar.
+        with file_lock(checkpoint_path):
             with open(checkpoint_path, "r", encoding="utf-8") as f:
                 return json.load(f)
 
@@ -334,30 +334,25 @@ class CADPipelineService:
         metadata_path = self._task_meta_path(task_id)
         if not metadata_path.exists():
             raise FileNotFoundError(f"Task not found: {task_id}")
-        # Use a shared lock so concurrent readers see a consistent snapshot.
-        with self._task_meta_lock(task_id):
+        # Use a cross-process file lock so concurrent readers see a consistent
+        # snapshot even when a writer in another process is mid-update.
+        with file_lock(metadata_path):
             return json.loads(metadata_path.read_text(encoding="utf-8"))
 
     def _save_task(self, task_id: str, payload: dict[str, Any]) -> None:
         metadata_path = self._task_meta_path(task_id)
         # Atomic write prevents readers from seeing a truncated/partial JSON.
-        with self._task_meta_lock(task_id):
+        # Cross-process file lock protects against concurrent multi-process writes.
+        with file_lock(metadata_path):
             atomic_write_json(metadata_path, payload)
-
-    def _task_meta_lock(self, task_id: str) -> threading.RLock:
-        # Use an RLock so the same thread can re-acquire it (e.g. when
-        # _load_task is called from within _update_task).
-        with self._task_meta_locks_guard:
-            lock = self._task_meta_locks.get(task_id)
-            if lock is None:
-                lock = threading.RLock()
-                self._task_meta_locks[task_id] = lock
-            return lock
 
     def _update_task(self, task_id: str, **patch: Any) -> dict[str, Any]:
         # Serialize read-modify-write on the task metadata file so concurrent
-        # updates don't clobber each other (lost-update bug).
-        with self._task_meta_lock(task_id):
+        # updates (including from other processes) don't clobber each other.
+        # file_lock is re-entrant, so _load_task / _save_task nested inside
+        # this block won't deadlock within the same thread.
+        metadata_path = self._task_meta_path(task_id)
+        with file_lock(metadata_path):
             metadata = self._load_task(task_id)
             metadata.update(patch)
             metadata["last_activity_at"] = time.time()
@@ -1162,17 +1157,18 @@ class CADPipelineService:
     def get_task_logs(self, task_id: str) -> str:
         log_path = self._task_log_path(task_id)
         if log_path.exists():
-            return log_path.read_text(encoding="utf-8")
-        # Fallback: return task metadata as pseudo-log for old tasks
-        meta_path = self._task_meta_path(task_id)
-        if meta_path.exists():
-            metadata = json.loads(meta_path.read_text(encoding="utf-8"))
-            lines = [f"[{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(metadata.get('created_at', 0)))}] 任务创建"]
-            lines.append(f"[{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(metadata.get('last_activity_at', 0)))}] 最后活动: stage={metadata.get('stage')}, status={metadata.get('status')}")
-            if metadata.get("last_error"):
-                lines.append(f"错误: {metadata['last_error']}")
-            return "\n".join(lines)
-        raise FileNotFoundError(f"Task not found: {task_id}")
+            # Acquire the same cross-process file lock used by _append_log
+            # so we get a consistent snapshot even mid-write.
+            with file_lock(log_path):
+                return log_path.read_text(encoding="utf-8")
+        # Fallback: return task metadata as pseudo-log for old tasks.
+        # Uses _load_task which acquires the cross-process file lock.
+        metadata = self._load_task(task_id)  # raises FileNotFoundError if absent
+        lines = [f"[{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(metadata.get('created_at', 0)))}] 任务创建"]
+        lines.append(f"[{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(metadata.get('last_activity_at', 0)))}] 最后活动: stage={metadata.get('stage')}, status={metadata.get('status')}")
+        if metadata.get("last_error"):
+            lines.append(f"错误: {metadata['last_error']}")
+        return "\n".join(lines)
 
     def apply_translation(
         self,
@@ -1265,8 +1261,8 @@ class CADPipelineService:
         """Clear all tasks by removing the root tasks directory."""
         tasks_root = self._tasks_root()
         self._cancelled_task_ids.clear()
-        with self._task_meta_locks_guard:
-            self._task_meta_locks.clear()
+        # No in-process lock dict to clean up — locking is provided by
+        # file_lock's per-path sidecar files, which are removed with the tree.
         if tasks_root.exists():
             self._delete_tree(tasks_root)
         # Recreate the root directory to ensure it exists for future tasks
@@ -1277,8 +1273,8 @@ class CADPipelineService:
         if not task_dir.exists():
             raise FileNotFoundError(f"Task not found: {task_id}")
         self._cancelled_task_ids.discard(task_id)
-        with self._task_meta_locks_guard:
-            self._task_meta_locks.pop(task_id, None)
+        # No in-process lock dict to clean up — locking is provided by
+        # file_lock's per-path sidecar files, which are removed with the tree.
         self._delete_tree(task_dir)
 
     def stop_all_tasks(self) -> dict[str, Any]:

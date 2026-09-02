@@ -10,11 +10,14 @@ Design notes:
 - On Windows we use ``msvcrt.locking`` for byte-range locks.
 - Atomic writes write to a temp file in the same directory, then ``os.replace``
   which is atomic on both POSIX and NTFS.
-- All helpers accept a ``Path`` and return a context manager (``with`` block).
-
-Thread-safety within a process is provided by a per-path RLock. The OS-level
-lock is only acquired on the outermost acquisition (depth 0), so nested
-``with file_lock(path)`` in the same thread won't deadlock on flock.
+- Locks are always acquired on a **stable sidecar ``.lock`` file** that is
+  separate from the data file.  The data file itself may be atomically
+  replaced (``os.replace``) inside the critical section without invalidating
+  the lock identity — the lock inode lives on the sidecar, which is never
+  renamed/deleted.
+- Thread-safety within a process is provided by a per-sidecar-path RLock.
+  The OS-level lock is only acquired on the outermost acquisition (depth 0),
+  so nested ``with file_lock(path)`` in the same thread won't deadlock.
 """
 
 from __future__ import annotations
@@ -27,13 +30,19 @@ import threading
 from pathlib import Path
 from typing import Any, Iterator
 
+
+def _sidecar_path(path: Path) -> Path:
+    """Return the stable sidecar ``.lock`` file path for ``path``."""
+    return Path(str(path) + ".lock")
+
+
 # Module-level guard for in-process cross-thread locking.
-# Keyed by the resolved path string.
+# Keyed by the resolved sidecar path string.
 _global_locks: dict[str, threading.RLock] = {}
 _global_locks_guard = threading.Lock()
 
-# Track acquisition depth per thread per path so we only acquire the OS-level
-# lock on the outermost entry. Key: (thread_id, resolved_path_str) -> depth.
+# Track acquisition depth per thread per sidecar path so we only acquire the
+# OS-level lock on the outermost entry. Key: (thread_id, sidecar_path_str).
 _lock_depths: dict[tuple[int, str], int] = {}
 _lock_depths_guard = threading.Lock()
 
@@ -53,26 +62,28 @@ def _get_process_lock(path: Path) -> threading.RLock:
 def file_lock(path: Path, blocking: bool = True) -> Iterator[None]:
     """Acquire an advisory cross-process file lock for ``path``.
 
-    Also acquires an in-process RLock first so that threads in the same process
-    don't queue up on the OS-level lock (which can deadlock with re-entrancy).
-
-    Nested ``with file_lock(path)`` in the same thread is safe: the OS-level
-    flock is only acquired on the outermost entry.
+    The lock is held on a **sidecar ``.lock`` file** that is separate from the
+    target data file.  This is crucial because callers often atomically replace
+    the target file (``os.replace``) inside the critical section; locking the
+    target inode directly would invalidate the lock once the file is replaced.
+    The sidecar file is never renamed or deleted, so its inode (and thus the
+    OS-level lock identity) is stable across the entire critical section.
 
     Args:
-        path:    The file to lock (parent directory must exist).
+        path:    The file to protect.  The sidecar is ``<path>.lock``.
         blocking: If True, block until the lock is acquired. If False, raise
                   ``TimeoutError`` if the lock cannot be acquired immediately.
     """
     path = Path(path).resolve()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lock_key = str(path)
+    sidecar = _sidecar_path(path)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    lock_key = str(sidecar)
 
     # In-process lock first (RLock is re-entrant within the same thread).
-    proc_lock = _get_process_lock(path)
+    proc_lock = _get_process_lock(sidecar)
     proc_lock.acquire()
 
-    # Track nesting depth for this thread+path.
+    # Track nesting depth for this thread+sidecar path.
     tid = threading.get_ident()
     depth_key = (tid, lock_key)
     with _lock_depths_guard:
@@ -81,8 +92,8 @@ def file_lock(path: Path, blocking: bool = True) -> Iterator[None]:
 
     try:
         if depth == 0:
-            # Outermost acquisition: acquire the OS-level lock.
-            with open(path, "a+", encoding="utf-8") as lock_file:
+            # Outermost acquisition: acquire the OS-level lock on the sidecar.
+            with open(sidecar, "a+", encoding="utf-8") as lock_file:
                 lock_file.flush()
                 try:
                     _acquire_os_lock(lock_file, blocking)
@@ -106,7 +117,7 @@ def file_lock(path: Path, blocking: bool = True) -> Iterator[None]:
 
 
 def _acquire_os_lock(lock_file, blocking: bool) -> None:
-    """Acquire the OS-level lock (fcntl.flock on POSIX, msvcrt on Windows)."""
+    """Acquire the OS-level lock on the sidecar file."""
     if os.name == "nt":
         import msvcrt
 

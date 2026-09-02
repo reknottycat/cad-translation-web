@@ -42,7 +42,7 @@ async def save_cad_defaults(request: dict):
         raise HTTPException(status_code=500, detail=f"Save CAD defaults failed: {exc}") from exc
 
 
-@router.post("/extract")
+@router.post("/extract", dependencies=[Depends(require_admin_access)])
 async def extract_cad_text(
     file: UploadFile = File(...),
     converter_backend: str = Form(default="auto"),
@@ -76,7 +76,7 @@ async def extract_cad_text(
         raise HTTPException(status_code=500, detail=f"CAD extract failed: {exc}") from exc
 
 
-@router.post("/apply-translation")
+@router.post("/apply-translation", dependencies=[Depends(require_admin_access)])
 async def apply_translation_to_cad(request: dict):
     """
     将用户提供的翻译应用到 CAD 文件。
@@ -117,7 +117,7 @@ async def apply_translation_to_cad(request: dict):
         raise HTTPException(status_code=500, detail=f"Apply translation failed: {exc}") from exc
 
 
-@router.post("/upload")
+@router.post("/upload", dependencies=[Depends(require_admin_access)])
 async def upload_cad_file(
     file: UploadFile = File(...),
     target_language: str = Form(default="en"),
@@ -162,7 +162,7 @@ async def upload_cad_file(
         raise HTTPException(status_code=500, detail=f"CAD upload failed: {exc}") from exc
 
 
-@router.get("/download/{task_id}/{file_type}")
+@router.get("/download/{task_id}/{file_type}", dependencies=[Depends(require_admin_access)])
 async def download_file(task_id: str, file_type: str):
     try:
         file_path, media_type = cad_pipeline_service.resolve_download(task_id, file_type)
@@ -189,7 +189,7 @@ async def download_package(request: dict):
         raise HTTPException(status_code=500, detail=f"Package download failed: {exc}") from exc
 
 
-@router.get("/tasks")
+@router.get("/tasks", dependencies=[Depends(require_admin_access)])
 async def list_tasks():
     try:
         return JSONResponse({"success": True, "data": cad_pipeline_service.list_tasks()})
@@ -215,7 +215,7 @@ async def clear_all_tasks():
         raise HTTPException(status_code=500, detail=f"Clear tasks failed: {exc}") from exc
 
 
-@router.post("/tasks/{task_id}/resume")
+@router.post("/tasks/{task_id}/resume", dependencies=[Depends(require_admin_access)])
 async def resume_task(task_id: str, request: dict):
     """Resume an interrupted or failed CAD task from its last checkpoint."""
     try:
@@ -238,7 +238,7 @@ async def resume_task(task_id: str, request: dict):
         raise HTTPException(status_code=500, detail=f"Resume task failed: {exc}") from exc
 
 
-@router.get("/tasks/{task_id}/logs")
+@router.get("/tasks/{task_id}/logs", dependencies=[Depends(require_admin_access)])
 async def get_task_logs(task_id: str):
     """Get human-readable logs for a CAD task."""
     try:
@@ -321,6 +321,6 @@ async def health_check():
     )
 
 
-@router.put("/dictionary/{task_id}/update")
+@router.put("/dictionary/{task_id}/update", dependencies=[Depends(require_admin_access)])
 async def update_dictionary_entry(task_id: str, request: dict):
     return {"success": True, "message": "dictionary update acknowledged", "task_id": task_id, "request": request}
