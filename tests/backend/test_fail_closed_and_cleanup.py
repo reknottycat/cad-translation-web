@@ -214,8 +214,16 @@ def test_cleanup_after_delete_does_not_recreate_task_dir():
 
 # ----------------------- 3. multiprocessing delete-vs-cleanup race ----------
 
-def _mp_cleanup_after_delete(env_file, runtime_cfg, task_id, result_queue):
-    """Worker process: simulate cleanup after task was deleted by another."""
+def _mp_cleanup_after_delete(env_file, runtime_cfg, task_id, result_queue, delete_done):
+    """Worker process: simulate cleanup after task was deleted by another.
+
+    ``delete_done`` is a shared ``multiprocessing.Event`` set by the delete
+    worker once ``delete_task`` has fully returned.  The cleanup worker blocks
+    on it (bounded) so the cancellation / no-orphan checks run only *after* the
+    delete has actually completed — instead of relying on a fixed ``sleep``
+    that could elapse before the concurrently-spawned delete worker was even
+    scheduled to run (the flaky failure seen under CI load).
+    """
     import os
     os.environ["CAD_TRANSLATION_ENV_FILE"] = env_file
     os.environ["CAD_TRANSLATION_RUNTIME_CONFIG_FILE"] = runtime_cfg
@@ -225,7 +233,11 @@ def _mp_cleanup_after_delete(env_file, runtime_cfg, task_id, result_queue):
     from app.services.cad_pipeline_service import CADPipelineService
 
     svc = CADPipelineService()
-    time.sleep(0.3)  # Give the delete worker a head start
+    # Wait until the delete worker reports it has finished deleting the task.
+    # Deterministic ordering: these checks must observe the post-delete state.
+    if not delete_done.wait(timeout=30):
+        result_queue.put(("timed_out_waiting_for_delete", True))
+        return
 
     # Running worker checks cancellation
     is_cancelled = svc._is_task_cancelled(task_id)
@@ -246,7 +258,7 @@ def _mp_cleanup_after_delete(env_file, runtime_cfg, task_id, result_queue):
     result_queue.put(("orphan_files", [str(p) for p in orphan_files]))
 
 
-def _mp_delete_task(env_file, runtime_cfg, task_id, result_queue):
+def _mp_delete_task(env_file, runtime_cfg, task_id, result_queue, delete_done):
     """Worker process: delete the task directory."""
     import os
     os.environ["CAD_TRANSLATION_ENV_FILE"] = env_file
@@ -259,6 +271,8 @@ def _mp_delete_task(env_file, runtime_cfg, task_id, result_queue):
     svc = CADPipelineService()
     svc.delete_task(task_id)
     result_queue.put(("deleted", True))
+    # Signal cleanup worker that deletion has completed.
+    delete_done.set()
 
 
 def test_mp_delete_while_cleanup_runs_leaves_no_orphans():
@@ -282,14 +296,21 @@ def test_mp_delete_while_cleanup_runs_leaves_no_orphans():
     ctx = multiprocessing.get_context("spawn")
     q_delete = ctx.Queue()
     q_cleanup = ctx.Queue()
+    delete_done = ctx.Event()
 
-    del_proc = ctx.Process(target=_mp_delete_task, args=(env_file, runtime_cfg, task_id, q_delete))
-    cleanup_proc = ctx.Process(target=_mp_cleanup_after_delete, args=(env_file, runtime_cfg, task_id, q_cleanup))
+    del_proc = ctx.Process(
+        target=_mp_delete_task,
+        args=(env_file, runtime_cfg, task_id, q_delete, delete_done),
+    )
+    cleanup_proc = ctx.Process(
+        target=_mp_cleanup_after_delete,
+        args=(env_file, runtime_cfg, task_id, q_cleanup, delete_done),
+    )
 
     del_proc.start()
     cleanup_proc.start()
-    del_proc.join(timeout=20)
-    cleanup_proc.join(timeout=20)
+    del_proc.join(timeout=40)
+    cleanup_proc.join(timeout=40)
 
     assert not del_proc.is_alive(), "Delete process timed out"
     assert not cleanup_proc.is_alive(), "Cleanup process timed out"
@@ -306,6 +327,9 @@ def test_mp_delete_while_cleanup_runs_leaves_no_orphans():
         cleanup_results[k] = v
 
     assert delete_results.get("deleted") is True
+    assert cleanup_results.get("timed_out_waiting_for_delete") is not True, (
+        "Cleanup process timed out waiting for the delete worker to finish"
+    )
     assert cleanup_results.get("is_cancelled") is True, (
         "Cleanup process should detect task as cancelled after deletion"
     )

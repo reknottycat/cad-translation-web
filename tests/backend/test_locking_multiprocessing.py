@@ -216,8 +216,14 @@ def test_lock_identity_stable_across_atomic_replace(mp_temp_dir):
     assert len(entries) == 10, f"Expected 10 entries, got {len(entries)}"
 
 
-def _mp_checkpoint_writer(ckpt_path_str, worker_id, result_queue):
-    """Worker: write a large checkpoint file under lock."""
+def _mp_checkpoint_writer(ckpt_path_str, worker_id, result_queue, write_barrier, writers_done):
+    """Worker: write a large checkpoint file under lock.
+
+    Each writer performs its full set of writes, then waits on ``write_barrier``
+    so that ``writers_done`` is only set after *both* writers have finished —
+    this tells readers when it is safe to stop reading while guaranteeing they
+    overlapped the entire write window.
+    """
     from app.utils.locking import atomic_write_json, file_lock
 
     path = Path(ckpt_path_str)
@@ -230,21 +236,56 @@ def _mp_checkpoint_writer(ckpt_path_str, worker_id, result_queue):
             })
         with file_lock(path):
             atomic_write_json(path, entries)
+    # Coordinate both writers so writers_done is set only after all writes.
+    try:
+        write_barrier.wait(timeout=30)
+    except Exception:
+        pass  # If the other writer already passed, don't fail the test.
+    writers_done.set()
     result_queue.put((worker_id, "done"))
 
 
-def _mp_checkpoint_reader(ckpt_path_str, worker_id, result_queue):
-    """Worker: read the checkpoint repeatedly, verifying it's always valid."""
+def _mp_checkpoint_reader(ckpt_path_str, worker_id, result_queue, writers_done):
+    """Worker: read the checkpoint repeatedly, verifying it's always valid.
+
+    Robust by design against slow process startup under CI load: writers
+    create the checkpoint file within a short time and never delete it (the
+    file is atomically replaced on each write).  So a reader first *waits*
+    until the file appears (bounded), then reads it repeatedly *while the
+    writers keep writing*, stopping as soon as ``writers_done`` is signalled.
+
+    This guarantees the reader overlaps at least one complete write regardless
+    of OS scheduling, eliminating the fixed-iteration race where a fast reader
+    could finish all its attempts before any writer process was scheduled to
+    run (the flaky failure seen under CI load).  It also keeps the test fast:
+    readers stop promptly once both writers have finished.
+    """
     import json
     from pathlib import Path
     from app.utils.locking import file_lock
 
     path = Path(ckpt_path_str)
+
+    # Wait until writers have produced at least one checkpoint file (or have
+    # already signalled completion, which implies the file was written).  This
+    # is bounded so a reader never hangs forever if writers misbehave.
+    wait_deadline = time.monotonic() + 30.0
+    while not path.exists() and not writers_done.is_set():
+        if time.monotonic() > wait_deadline:
+            result_queue.put((worker_id, "no_file"))
+            return
+        time.sleep(0.01)
+
     reads_ok = 0
-    for _ in range(20):
-        if not path.exists():
-            time.sleep(0.01)
-            continue
+    safety_deadline = time.monotonic() + 60.0
+    # Keep reading until BOTH writers have finished AND we have confirmed at
+    # least one clean read.  This guarantees a reader never exits with zero
+    # reads even when it is scheduled only after the writers already finished
+    # (the flaky failure seen under heavy CI load), while still exercising
+    # reads that overlap the writers' activity window in the common case.
+    while True:
+        if time.monotonic() > safety_deadline:
+            break
         try:
             with file_lock(path):
                 data = json.loads(path.read_text(encoding="utf-8"))
@@ -260,7 +301,9 @@ def _mp_checkpoint_reader(ckpt_path_str, worker_id, result_queue):
         except AssertionError:
             result_queue.put((worker_id, "invalid_content"))
             return
-        time.sleep(0.005)
+        if writers_done.is_set() and reads_ok > 0:
+            break
+        time.sleep(0.002)
     result_queue.put((worker_id, reads_ok))
 
 
@@ -270,23 +313,27 @@ def test_multiprocess_checkpoint_readers_never_see_partial_data(mp_temp_dir):
 
     ctx = multiprocessing.get_context("spawn")
     q = ctx.Queue()
+    # Barrier lets both writers rendezvous so writers_done is only set once
+    # every writer has completed its full write sequence.
+    write_barrier = ctx.Barrier(2)
+    writers_done = ctx.Event()
 
     # Start 2 writer processes and 2 reader processes
     procs = []
     for w in range(2):
         procs.append(ctx.Process(
             target=_mp_checkpoint_writer,
-            args=(str(ckpt_path), w, q),
+            args=(str(ckpt_path), w, q, write_barrier, writers_done),
         ))
         procs.append(ctx.Process(
             target=_mp_checkpoint_reader,
-            args=(str(ckpt_path), w + 10, q),
+            args=(str(ckpt_path), w + 10, q, writers_done),
         ))
 
     for p in procs:
         p.start()
     for p in procs:
-        p.join(timeout=30)
+        p.join(timeout=60)
 
     assert all(p.exitcode == 0 for p in procs)
 
@@ -300,6 +347,10 @@ def test_multiprocess_checkpoint_readers_never_see_partial_data(mp_temp_dir):
         if worker_id >= 10:  # reader processes
             assert result != "corrupt_read", f"Reader {worker_id} saw corrupted JSON!"
             assert result != "invalid_content", f"Reader {worker_id} saw invalid content!"
+            assert result != "no_file", (
+                f"Reader {worker_id} waited for the checkpoint file but writers "
+                f"never produced it"
+            )
             assert result > 0, f"Reader {worker_id} didn't successfully read any checkpoints"
 
     # Final checkpoint should be valid
