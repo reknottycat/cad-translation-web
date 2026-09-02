@@ -171,10 +171,104 @@ It is a runnable delivery package, not a source checkout. The bundle keeps the b
 
 - The launcher runs the backend in single-process mode.
 - The frontend is served from the packaged `frontend/dist` folder.
-- This runtime bundle intentionally excludes development-only files such as frontend source, tests, and `agent-harness`.
+- This runtime bundle intentionally excludes development-only files such as frontend source, tests, caches, databases, `.env` and keys. The `cad-translate` CLI source ships under `cli/`.
 '@ | Set-Content -Encoding utf8 -LiteralPath $DestinationPath
 }
 
+function Write-CliReadme([string]$DestinationPath) {
+    @'
+# cad-translate CLI (bundled)
+
+`cad-translate` is the local command line interface for CAD drawing translation.
+It shares the trusted backend implementation bundled under `backend/`; no
+duplicate pipeline code ships in the CLI.
+
+## Install the command
+
+From a terminal in this directory run:
+
+    pip install -r requirements.txt
+    .\install_cli.bat
+
+or, for a per-user install:
+
+    pip install --user -e .\cli
+
+`install_cli.bat` installs the package from `./cli` and exposes the
+`cad-translate` command.
+
+## Quick start
+
+    cad-translate --version
+    cad-translate doctor
+    cad-translate config show
+    cad-translate files list --path .
+    cad-translate project new --name demo
+
+Requires Python 3.10+. DWG->DXF conversion needs AutoCAD/GstarCAD/ZWCAD (COM),
+the ODA File Converter, or LibreDWG on PATH; DXF-only and Excel workflows do
+not need a CAD application. Excel translation needs a configured LLM provider.
+
+Config and output locations follow the Web backend: see `cad-translate doctor`.
+'@ | Set-Content -Encoding utf8 -LiteralPath $DestinationPath
+}
+
+function Write-CliLauncher([string]$DestinationPath) {
+    @'
+@echo off
+setlocal
+cd /d "%~dp0"
+where python >nul 2>nul
+if %errorlevel%==0 (
+    set "PYTHON=python"
+    set "PYTHON_ARGS="
+) else (
+    where py >nul 2>nul
+    if %errorlevel%==0 (
+        set "PYTHON=py"
+        set "PYTHON_ARGS=-3"
+    ) else (
+        echo Python was not found. Please install Python 3.10+.
+        exit /b 1
+    )
+)
+set "DELIVERY_ROOT=%CD%"
+set "CAD_TRANSLATION_BACKEND_DIR=%DELIVERY_ROOT%\backend"
+set "CLI_DIR=%DELIVERY_ROOT%\cli"
+%PYTHON% %PYTHON_ARGS% -c "import sys; sys.path.insert(0, r'%CLI_DIR%'); from cad_translate.cli import main; main()" %*
+endlocal
+'@ | Set-Content -Encoding ascii -LiteralPath $DestinationPath
+}
+
+function Write-CliInstallBat([string]$DestinationPath) {
+    @'
+@echo off
+setlocal
+cd /d "%~dp0"
+where python >nul 2>nul
+if %errorlevel%==0 (
+    set "PYTHON=python"
+    set "PYTHON_ARGS="
+) else (
+    where py >nul 2>nul
+    if %errorlevel%==0 (
+        set "PYTHON=py"
+        set "PYTHON_ARGS=-3"
+    ) else (
+        echo Python was not found. Please install Python 3.10+.
+        exit /b 1
+    )
+)
+echo Installing cad-translate CLI into the current Python environment...
+%PYTHON% %PYTHON_ARGS% -m pip install --no-deps --editable .\cli
+if %errorlevel% neq 0 (
+    echo CLI install failed.
+    exit /b 1
+)
+echo cad-translate installed. Run "cad-translate --help".
+endlocal
+'@ | Set-Content -Encoding ascii -LiteralPath $DestinationPath
+}
 Remove-IfExists $outDir
 Remove-IfExists $zipPath
 New-Item -ItemType Directory -Force $outDir | Out-Null
@@ -218,6 +312,28 @@ Copy-DirectoryContents -SourceDir $toolsSource -DestinationDir (Join-Path $outDi
 Copy-DirectoryContents -SourceDir $docsModernSource -DestinationDir (Join-Path $outDir "docs\modern") -ExcludePatterns @(
     '(^|\\)AUTO_FILE_INDEX\.md$'
 )
+# --- Bundle the cad-translate CLI source (maintained in agent-harness/) ---
+$cliSource = Join-Path $rootPath "agent-harness\cad_translate"
+if (Test-Path -LiteralPath $cliSource -PathType Container) {
+    Copy-DirectoryContents -SourceDir $cliSource -DestinationDir (Join-Path $outDir "cli\cad_translate") -ExcludePatterns @(
+        '(^|\\)__pycache__(\\|$)',
+        '(^|\\)\.pytest_cache(\\|$)',
+        '(^|\\)tests(\\|$)'
+    )
+    # Copy CLI packaging metadata so `pip install -e ./cli` works in the delivery.
+    $cliPkgDir = Join-Path $outDir "cli"
+    New-Item -ItemType Directory -Force $cliPkgDir | Out-Null
+    foreach ($cliMeta in @("setup.py", "pyproject.toml", "README.md", "MANIFEST.in")) {
+        $metaPath = Join-Path (Join-Path $rootPath "agent-harness") $cliMeta
+        if (Test-Path -LiteralPath $metaPath -PathType Leaf) {
+            Copy-Item -LiteralPath $metaPath -Destination (Join-Path $cliPkgDir $cliMeta) -Force
+        }
+    }
+    Write-Host "cad-translate CLI bundled under $cliPkgDir"
+} else {
+    Write-Host "agent-harness/cad_translate not found; skipping CLI bundling."
+}
+
 
 foreach ($fileName in @("requirements.txt")) {
     $sourcePath = Join-Path $rootPath $fileName
@@ -234,6 +350,9 @@ if ($secretFiles) {
 
 Write-DeliveryLauncher -DestinationPath (Join-Path $outDir "start_delivery.bat")
 Write-DeliveryReadme -DestinationPath (Join-Path $outDir "README.md")
+Write-CliLauncher -DestinationPath (Join-Path $outDir "cad-cli.bat")
+Write-CliInstallBat -DestinationPath (Join-Path $outDir "install_cli.bat")
+Write-CliReadme -DestinationPath (Join-Path $outDir "CLI.md")
 
 [System.IO.Compression.ZipFile]::CreateFromDirectory(
     $outDir,

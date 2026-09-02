@@ -75,7 +75,33 @@ npm run dev
 powershell -ExecutionPolicy Bypass -File scripts/build_scale.ps1
 ```
 
-产物为 `scale_release/` 和 `scale_release.zip`。该目录由构建脚本生成，不入库。
+产物为 `scale_release/` 和 `scale_release.zip`。该目录由构建脚本生成，不入库。自 v2.0.0 起，交付包还内置 `cad-translate` CLI（位于包内 `cli/`，详见 `CLI.md`）。
+
+### CLI
+
+`cad-translate` CLI 是本仓库明确维护的组件（见 `agent-harness/`）。它是对 `backend/app` 可信实现的薄封装——与 Web 应用共享同一套代码，绝不携带容易漂移的重复 `lib/` 快照。
+
+```powershell
+cd agent-harness
+pip install -e .
+cad-translate --version     # cad-translate, version 2.0.0
+cad-translate --help
+cad-translate doctor         # 环境自检
+```
+
+典型流程（仅处理 DXF 时无需 AutoCAD）：
+
+```bash
+cad-translate config set --target-language en
+cad-translate project new --name demo -o project.json
+cad-translate files list --path ./drawings
+cad-translate pipeline extract -i drawing.dxf            # -> Excel
+cad-translate pipeline translate-excel -i texts.xlsx     # 需配置 LLM
+cad-translate pipeline apply -i drawing.dxf -e texts_translated.xlsx
+cad-translate tasks list
+```
+
+任意命令加 `--json` 即可输出 JSON。配置与输出位置与后端保持一致；可用 `cad-translate doctor` 查看。
 
 ## 项目结构
 
@@ -93,6 +119,9 @@ cad-code/
 |   |   `-- functions/           # DWG 转换、文字提取、回填
 |   |-- requirements.txt
 |   `-- run_server.py
+|-- agent-harness/               # cad-translate CLI 包（明确维护）
+|   |-- cad_translate/           # click 门面 -> 委托 backend/app
+|   `-- setup.py                 # 单一 SemVer 版本，读取 backend/app/version.py
 |-- frontend/                    # React 前端
 |   |-- src/
 |   |   |-- pages/TranslationWorkbenchPage.tsx

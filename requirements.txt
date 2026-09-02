@@ -22,10 +22,10 @@ alembic>=1.13.0
 ezdxf>=1.3.0
 pandas>=2.2.0
 openpyxl>=3.1.0
-xlrd>=2.0.1  # 支持 .xls 术语表/Excel 旧格式解析
+xlrd>=2.0.1  # support legacy .xls glossary/Excel parsing (openpyxl only reads .xlsx)
 requests>=2.31.0
-PyYAML>=6.0.0  # workflow 引擎解析 YAML frontmatter
-openai>=1.0.0  # scripts/image_gen.py 图像生成脚本
+PyYAML>=6.0.0  # workflow engine parses YAML frontmatter
+openai>=1.0.0  # scripts/image_gen.py image generation script
 
 # Configuration / validation / logging
 pydantic>=2.8.0

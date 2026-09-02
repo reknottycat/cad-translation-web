@@ -190,9 +190,10 @@ package-lock.json
 
 # Superseded/legacy components removed from release repo
 .trans_CAD_gui_V1.0/
-agent-harness/
 docs/legacy/
 docs/plans/
+# cad-translate CLI is a maintained component (see agent-harness/README.md)
+# and is intentionally NOT ignored.
 命令行专用/
 样图/
 v1.1-web-frontend.png

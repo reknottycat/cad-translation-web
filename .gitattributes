@@ -6,3 +6,6 @@ backend/app/routers/projects.py whitespace=cr-at-eol
 backend/app/database.py whitespace=cr-at-eol
 backend/app/services/autocad_converter.py whitespace=cr-at-eol
 backend/app/services/haochen_optimized_converter.py whitespace=cr-at-eol
+
+# scripts/*.ps1 are authored with CRLF line endings (Windows PowerShell).
+scripts/build_scale.ps1 whitespace=cr-at-eol

@@ -54,7 +54,34 @@ Build a runtime bundle locally:
 powershell -ExecutionPolicy Bypass -File scripts/build_scale.ps1
 ```
 
-Output: `scale_release/` and `scale_release.zip`. The folder is generated locally and is not tracked in this repository.
+Output: `scale_release/` and `scale_release.zip`. The folder is generated locally and is not tracked in this repository. Starting with v2.0.0 the bundle also ships the `cad-translate` CLI under `cli/` (see `CLI.md` in the bundle).
+
+### CLI
+
+The `cad-translate` CLI is a maintained component of this repository (see `agent-harness/`). It is a thin facade over the same `backend/app` trusted implementation the Web app uses — it never keeps its own drifting snapshot of the CAD pipeline.
+
+```powershell
+cd agent-harness
+pip install -e .
+cad-translate --version     # cad-translate, version 2.0.0
+cad-translate --help
+cad-translate doctor         # environment sanity check
+```
+
+Typical flow (no AutoCAD needed for DXF-only work):
+
+```bash
+cad-translate config set --target-language en
+cad-translate project new --name demo -o project.json
+cad-translate files list --path ./drawings
+cad-translate pipeline extract -i drawing.dxf            # -> Excel
+cad-translate pipeline translate-excel -i texts.xlsx     # needs an LLM provider
+cad-translate pipeline apply -i drawing.dxf -e texts_translated.xlsx
+cad-translate tasks list
+```
+
+JSON output is available on any command with `--json`. Configuration and output
+locations follow the backend; see `cad-translate doctor`.
 
 ## Project Structure
 
@@ -72,6 +99,9 @@ cad-code/
 |   |   `-- functions/           # DWG conversion, extraction, backfill
 |   |-- requirements.txt
 |   `-- run_server.py
+|-- agent-harness/               # cad-translate CLI package (maintained)
+|   |-- cad_translate/           # click facade -> delegates to backend/app
+|   `-- setup.py                 # single SemVer read from backend/app/version.py
 |-- frontend/                    # React frontend
 |   |-- src/
 |   |   |-- pages/TranslationWorkbenchPage.tsx

@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .version import __version__
 from .config import get_settings
 from .database import Base, engine
 from .routers import files, projects, translation
@@ -68,7 +69,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="CAD Translation Web API",
     description="CAD translation processing platform with unified model configuration.",
-    version="1.0.0",
+    version=__version__,
     lifespan=lifespan,
     docs_url="/api/docs",
     redoc_url="/api/redoc",
@@ -137,7 +138,7 @@ async def root():
         return FileResponse(frontend_index_file)
     return {
         "message": "CAD translation backend API",
-        "version": "1.0.0",
+        "version": __version__,
         "docs": "/api/docs",
         "status": "running",
     }
