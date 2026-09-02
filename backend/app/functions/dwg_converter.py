@@ -22,6 +22,17 @@ from urllib.parse import urlparse
 import ezdxf
 import structlog
 
+try:  # pragma: no cover - depends on package context
+    from app.functions import autocad_discovery
+    from app.functions import com_activation_probe as _com_probe
+    from app.functions.autocad_discovery import (
+        AUTOCAD_BASELINE_PROGIDS as _AUTOCAD_BASELINE_PROGIDS,
+    )
+except Exception:  # pragma: no cover - standalone/odd sys.path
+    autocad_discovery = None
+    _AUTOCAD_BASELINE_PROGIDS = []
+    _com_probe = None
+
 
 logger = structlog.get_logger(__name__)
 
@@ -64,6 +75,22 @@ class DWGConverter:
         self.libredwg_install_dir = libredwg_install_dir
         self.libredwg_download_url = libredwg_download_url
         self.libredwg_auto_download = libredwg_auto_download
+        # When a COM backend is registered but no process is running, registry
+        # presence does not prove Dispatch will return (a registered-but-hung
+        # 浩辰/中望 ProgID can block for tens of seconds).  Bounded live-activation
+        # probing during inspection distinguishes "confirmed activatable" from
+        # "registered but activation timed out / failed" so the auto chain does
+        # not waste a long time on a backend whose COM server never answers.
+        self.com_activation_probe_enabled = True
+        # Unified activation bound shared with com_activation_probe: a single
+        # CAD_COM_ACTIVATION_TIMEOUT knob drives both the probe and the connection
+        # layer.  Default 30s gives a real AutoCAD 2026 cold start (~6.5s) clear
+        # margin while still bounding a hung COM server.
+        if _com_probe is not None:
+            _probe_default = _com_probe.default_activation_timeout()
+        else:
+            _probe_default = float(os.environ.get("CAD_COM_ACTIVATION_TIMEOUT", "30"))
+        self.com_activation_probe_timeout = _probe_default
 
     def _backend_root(self) -> Path:
         return Path(__file__).resolve().parents[2]
@@ -221,14 +248,12 @@ class DWGConverter:
                 "Gcad.Application.26",
                 "ZWCAD.Application",
             ],
-            "autocad_com": [
-                "AutoCAD.Application",
-                "AutoCAD.Application.24.1",
-                "AutoCAD.Application.24",
-                "AutoCAD.Application.23.1",
-                "AutoCAD.Application.23",
-                "AutoCAD.Application.22",
-            ],
+            # AutoCAD uses dynamic versioned discovery via the registry so future
+            # releases (AutoCAD.Application.<major>[.<minor>]) are recognised even
+            # when this code has not been updated to list them explicitly.
+            "autocad_com": list(_AUTOCAD_BASELINE_PROGIDS)
+            if autocad_discovery is None
+            else autocad_discovery.discovered_autocad_progids(),
         }
         return mapping.get(backend, [])
 
@@ -263,24 +288,111 @@ class DWGConverter:
         return names
 
     def _registered_prog_ids(self) -> set[str]:
-        if os.name != "nt":
-            return set()
-        try:
-            import winreg
-        except ImportError:
-            return set()
+        if os.name != "nt" or autocad_discovery is None:
+            # Fall back to a fixed ProgID probe when the discovery helper is not
+            # importable (odd sys.path) but winreg exists.
+            if os.name != "nt":
+                return set()
+            try:
+                import winreg
+            except ImportError:
+                return set()
+            registered: set[str] = set()
+            for backend in ("haochen_com", "autocad_com"):
+                for prog_id in self._backend_prog_ids(backend):
+                    try:
+                        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, prog_id):
+                            registered.add(prog_id.lower())
+                    except OSError:
+                        continue
+            return registered
+
+        # Prefer the dedicated discovery module: it enumerates versioned AutoCAD
+        # ProgIDs and distinguishes registry views.
+        from app.functions.autocad_discovery import _iter_registered_autocad_keys
 
         registered: set[str] = set()
-        for backend in ("haochen_com", "autocad_com"):
+        try:
+            for prog_id, _ in _iter_registered_autocad_keys():
+                registered.add(prog_id.lower())
+        except Exception:
+            pass
+        # haochen/ZWCAD/GStarCAD ProgIDs are still resolved via a classic open.
+        for backend in ("haochen_com",):
             for prog_id in self._backend_prog_ids(backend):
                 try:
-                    with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, prog_id):
+                    import winreg as _wr
+
+                    with _wr.OpenKey(_wr.HKEY_CLASSES_ROOT, prog_id):
                         registered.add(prog_id.lower())
-                except OSError:
+                except Exception:
                     continue
         return registered
 
+    def _probe_com_activation(self, backend: str) -> str:
+        """Boundedly activate a registered-but-not-running COM backend.
+
+        Returns one of ``"activatable"`` / ``"activation_timeout"`` /
+        ``"activation_failed"`` / ``"registered"`` (the last when probing is
+        disabled or the probe cannot run, e.g. a non-Windows host).  Runs each
+        candidate ProgID under a per-attempt timeout so a hung COM server never
+        blocks the caller.
+
+        On Windows a *hung* COM server (one that never answers ``Dispatch``)
+        can still have started a CAD process (e.g. ``gcad.exe``) before it
+        stalls.  The probe flags such an attempt ``cleanup_required`` so the
+        caller can reclaim the stray process.  We record the CAD PIDs present
+        before probing and, only when a per-ProgID attempt timed out and asked
+        for cleanup, kill the PIDs that newly appeared with a matching image --
+        never a user's already-open CAD."""
+        if not self.com_activation_probe_enabled or _com_probe is None:
+            return "registered"
+        prog_ids = self._backend_prog_ids(backend)
+        if not prog_ids:
+            return "registered"
+        cad_images = self._backend_process_names(backend)
+        try:
+            # Snapshot of this backend's running CAD PIDs before any probe could
+            # start an instance, so a timeout reclaims only what *this* probe
+            # launched and leaves a user's open CAD untouched.
+            before = self._cad_pids(cad_images)
+            overall, per = _com_probe.probe_registered_prog_ids(
+                prog_ids, self.com_activation_probe_timeout
+            )
+            # The daemon worker closes an instance once Dispatch returns; but
+            # when a COM server *never* answers, the worker stays blocked inside
+            # Dispatch and cannot close the CAD process it already started.  That
+            # per-attempt outcome carries cleanup_required=True -- reclaim the
+            # newly-started matching CAD now so no orphan gcad.exe / acad.exe is
+            # left behind by inspect / auto-sieving.
+            if any(
+                isinstance(out, dict) and out.get("cleanup_required")
+                for out in per
+            ):
+                after = self._cad_pids(cad_images)
+                new_pids = after - before
+                if new_pids:
+                    self._kill_pids(new_pids)
+                    logger.warning(
+                        "com_probe_reclaimed_stray_cad",
+                        backend=backend,
+                        pids=sorted(new_pids),
+                    )
+            return overall  # activatable | activation_timeout | activation_failed
+        except Exception:  # pragma: no cover - probe must never crash inspection
+            logger.warning("com_activation_probe_failed", backend=backend)
+            return "registered"
+
     def inspect_backends(self) -> dict[str, dict[str, object]]:
+        """Inspect configured DWG backends and report availability.
+
+        For the AutoCAD COM backend the reasons are:
+          ``script_missing``, ``process_running``, ``registered``,
+          ``not_detected`` (=== not installed on this host).  ``detected`` is
+          True only when the Python bridge script exists AND the backend is
+          registered or running -- a lone Python script never implies AutoCAD
+          is installed.
+        """
         processes = self._running_process_names()
         registered_prog_ids = self._registered_prog_ids()
         disabled = self._disabled_backends()
@@ -293,11 +405,17 @@ class DWGConverter:
                     "detected": bool(oda_candidates),
                     "disabled": backend in disabled,
                     "reason": "binary_found" if oda_candidates else "binary_missing",
+                    "actionable": (
+                        "ODA File Converter binary found."
+                        if oda_candidates
+                        else "ODA File Converter was not found; install it or set ODA_FILE_CONVERTER_PATH."
+                    ),
                 }
                 continue
 
             script_ok = False
             reason = "unsupported"
+            actionable = reason
             if backend == "haochen_com":
                 script_ok = self._service_script_path("haochen_optimized_converter.py").exists()
             elif backend == "autocad_com":
@@ -308,25 +426,56 @@ class DWGConverter:
             detected = script_ok and (running or registered)
             if not script_ok:
                 reason = "script_missing"
+                actionable = (
+                    "Python COM bridge script is missing for this backend; "
+                    "the backend package is incomplete."
+                )
             elif running:
                 reason = "process_running"
+                actionable = "CAD application is running; conversion may proceed via COM."
             elif registered:
-                reason = "registered"
+                # Registry presence does not prove Dispatch will return.  Bound a
+                # real activation so a registered-but-hung 浩辰/中望 ProgID is not
+                # optimistically treated as usable and first in the fallback chain.
+                reason = self._probe_com_activation(backend)
+                actionable = {
+                    "activatable": "CAD application is installed and COM activation succeeded.",
+                    "activation_timeout": (
+                        "CAD application is registered but COM activation timed out "
+                        "(the COM server may be hung, blocked by a modal dialog, or "
+                        "hit a licensing/bitness/permission issue). The backend is "
+                        "skipped in the auto chain; check the installation."
+                    ),
+                    "activation_failed": (
+                        "CAD application is registered but COM activation failed "
+                        "(bitness / permissions / damaged registration). The backend "
+                        "is skipped in the auto chain."
+                    ),
+                }.get(reason, "CAD application is installed and registered.")
             else:
                 reason = "not_detected"
+                actionable = (
+                    "No CAD registration or process was detected on this host; "
+                    "the application is not installed/registered here."
+                )
 
             inspected[backend] = {
                 "detected": detected,
                 "disabled": backend in disabled,
                 "reason": reason,
+                "actionable": actionable,
             }
 
         return inspected
 
     def _select_auto_backends(self) -> list[str]:
-        # In auto mode we keep the full configured fallback chain in order, filtering only
-        # disabled backends. This preserves the intended semantics:
-        # haochen_com -> autocad_com -> oda (unless disabled).
+        # Auto mode: honour the configured fallback chain but sieve out COM
+        # backends that are *certainly* unusable on this host: the bridge script
+        # is missing, nothing is registered and no process is running, or a
+        # bounded live activation probe found the backend registered-but-hung or
+        # activation-failed.  A lone Python bridge script must never be treated
+        # as "AutoCAD is installed", and a merely-registered-but-not-activatable
+        # 浩辰/中望 backend must not be first in the chain (it would stall).
         configured = [
             backend
             for backend in self._configured_auto_backends()
@@ -336,19 +485,35 @@ class DWGConverter:
 
         selected: list[str] = []
         for backend in configured:
-            reason = inspected.get(backend, {}).get("reason")
-            # If the Python COM bridge script itself is missing, this backend can never run.
-            if backend in {"haochen_com", "autocad_com"} and reason == "script_missing":
+            info = inspected.get(backend, {})
+            reason = info.get("reason")
+            detected = info.get("detected", False)
+            if backend == "oda":
+                # ODA/LibreDWG-style binary fallbacks are kept only when present.
+                selected.append(backend)
+                continue
+            # COM backends: drop when the bridge script is missing, nothing is
+            # registered/running, or a bounded activation probe timed out/failed.
+            if reason in {
+                "script_missing",
+                "not_detected",
+                "activation_timeout",
+                "activation_failed",
+            } or not detected:
                 continue
             selected.append(backend)
 
-        if not selected:
+        # If the sieve removed every backend but something is configured, keep the
+        # original ordered chain so _convert_with_fallback produces a descriptive
+        # multi-backend error naming each failure instead of an empty list.
+        if not selected and configured:
             selected = configured
 
         logger.info(
             "dwg_auto_backends_selected",
             selected=selected,
-            strategy="configured_fallback_chain",
+            strategy="probe_sieved_fallback_chain",
+            inspected=inspected,
         )
         return selected
 
@@ -478,6 +643,51 @@ class DWGConverter:
         validated_output.replace(final_output_path)
         return str(final_output_path)
 
+    def _cad_pids(self, images: set[str]) -> set[str]:
+        """Return PIDs of running processes whose image name is in ``images``
+        (Windows only).  Used to reclaim a CAD process a timed-out COM conversion
+        may have launched."""
+        if os.name != "nt":
+            return set()
+        try:
+            completed = subprocess.run(
+                ["tasklist", "/fo", "csv", "/nh"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+                **self._subprocess_run_kwargs(),
+            )
+        except Exception:
+            return set()
+        if completed.returncode != 0:
+            return set()
+        wanted = {im.lower() for im in images}
+        pids: set[str] = set()
+        for row in csv_reader(StringIO(completed.stdout)):
+            if not row or len(row) < 2:
+                continue
+            if row[0].strip().lower() in wanted:
+                pids.add(row[1].strip())
+        return pids
+
+    def _kill_pids(self, pids: set[str]) -> None:
+        """Best-effort terminate the given PIDs (Windows only)."""
+        if not pids or os.name != "nt":
+            return
+        for pid in pids:
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", pid, "/F"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    **self._subprocess_run_kwargs(),
+                )
+            except Exception:
+                continue
+
     def _run_com_converter(
         self,
         converter_module: str,
@@ -516,8 +726,13 @@ class DWGConverter:
         ]
         # Acquire the global COM semaphore to avoid concurrent subprocesses racing
         # on the same CAD COM instance. Released in finally to survive exceptions/timeouts.
+        backend = "haochen_com" if "haochen" in converter_module else "autocad_com"
+        cad_images = self._backend_process_names(backend)
         _COM_SEMAPHORE.acquire()
         try:
+            # Record CAD PIDs before launching so, on a timeout, we can reclaim
+            # only the instance this conversion started (not a user's open CAD).
+            before = self._cad_pids(cad_images)
             completed = subprocess.run(
                 command,
                 capture_output=True,
@@ -530,8 +745,16 @@ class DWGConverter:
                 **self._subprocess_run_kwargs(),
             )
         except subprocess.TimeoutExpired as exc:
+            # Process-level reclamation: kill any CAD process this hung conversion
+            # launched so a late-returning COM server does not leave an orphan.
+            try:
+                after = self._cad_pids(cad_images)
+                self._kill_pids(after - before)
+            except Exception:  # pragma: no cover - best-effort cleanup
+                pass
             raise ValueError(
-                f"{class_name} timed out after {self._com_attempt_timeout()}s while opening or converting DWG."
+                f"{class_name} timed out after {self._com_attempt_timeout()}s while opening or converting DWG; "
+                "any CAD process started by this attempt was reclaimed."
             ) from exc
         finally:
             _COM_SEMAPHORE.release()

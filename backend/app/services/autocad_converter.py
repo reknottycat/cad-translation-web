@@ -17,9 +17,12 @@ import time
 from pathlib import Path
 import win32com.client
 from typing import List, Dict, Optional
-from collections import Counter, defaultdict
-import threading
-from concurrent.futures import ThreadPoolExecutor
+from collections import defaultdict
+
+try:
+    from app.functions import com_instance_guard as _guard
+except Exception:  # pragma: no cover - import-time safety on odd layouts
+    _guard = None
 
 class AutoCADConverter:
     """
@@ -31,8 +34,18 @@ class AutoCADConverter:
         self.app = None
         self.doc = None
         self.connected = False
+        self.last_error = None
         self.batch_size = 100  # 批处理大小
         self.progress_callback = None
+        # Per-ProgID bound for a single COM Dispatch/GetActiveObject attempt so a
+        # registered-but-hung ProgID cannot block a conversion for a long time.
+        self._activate_error = None
+        # True when a GetActiveObject result was a stale proxy (a probe had just
+        # quit the instance) and we re-Dispatched a fresh one.
+        self._stale_active_retried = False
+        # True when this connection started (Dispatch) a fresh CAD instance that
+        # we are responsible for quitting on disconnect.
+        self._dispatch_started = False
         
     def set_progress_callback(self, callback):
         """设置进度回调函数"""
@@ -54,55 +67,133 @@ class AutoCADConverter:
         except Exception:
             pass
 
-    def connect_to_cad(self) -> bool:
-        """
-        连接到AutoCAD应用程序 - 优化版
-        """
-        cad_prog_ids = [
+    def _autocad_prog_ids(self) -> list:
+        """Candidate AutoCAD ProgIDs, newest-registration first.
+
+        Prefer registry discovery so newer AutoCAD versions are recognised; fall
+        back to a static baseline when the discovery helper cannot run (e.g. a
+        non-Windows host used only for import-time checks)."""
+        discovered = []
+        try:
+            from app.functions import autocad_discovery as _disc
+            discovered = _disc.discovered_autocad_progids()
+        except Exception:
+            discovered = []
+        if discovered:
+            return discovered
+        return [
             "AutoCAD.Application",
-            "AutoCAD.Application.24.1", # AutoCAD 2022
-            "AutoCAD.Application.24",   # AutoCAD 2021
-            "AutoCAD.Application.23.1", # AutoCAD 2020
-            "AutoCAD.Application.23",   # AutoCAD 2019
-            "AutoCAD.Application.22",   # AutoCAD 2018
-            "GStarCAD.Application",     # Fallbacks
-            "Gcad.Application", 
-            "ZWCAD.Application"
+            "AutoCAD.Application.25",
+            "AutoCAD.Application.24.1",
+            "AutoCAD.Application.24",
+            "AutoCAD.Application.23.1",
+            "AutoCAD.Application.23",
+            "AutoCAD.Application.22",
         ]
-        
-        print("正在连接AutoCAD...")
-        
-        # 优先连接现有实例
+
+    def _try_activate_once(self, prog_id: str):
+        """Activate ``prog_id`` synchronously on the current thread.
+
+        COM apartment discipline: this converter runs inside a dedicated COM
+        subprocess whose main thread owns the apartment (com_converter_cli
+        initialises it).  Activation, use and release therefore happen on that
+        same thread -- we never spawn a worker thread that ``CoUninitialize()``s
+        and then hands a COM object back to another apartment (which yields a
+        dead proxy, e.g. ``AttributeError`` on ``app.Version``).
+
+        A **probe that just quit a freshly started CAD** can leave a stale ROT
+        entry for a short window; ``GetActiveObject`` then returns a stale proxy
+        that fails Version/Documents.  We detect that and automatically
+        ``Dispatch`` a fresh instance instead of binding to the dying one (see
+        ``com_instance_guard.acquire_usable_instance``).
+
+        Returns ``(kind, instance)`` where ``kind`` is ``"active"`` (a usable
+        already-running instance was attached) or ``"dispatch"`` (a usable fresh
+        instance was started), or ``None`` on error (recorded in
+        ``self._activate_error``).
+        """
+        self._activate_error = None
+        stale_hint: list = []
+        try:
+            kind, instance = _guard.acquire_usable_instance(
+                win32com.client, prog_id, stale_hint=stale_hint
+            )
+        except Exception as exc:  # noqa: BLE001 - COM raises generic exceptions
+            self._activate_error = str(exc) or type(exc).__name__
+            return None, None
+        if stale_hint:
+            self._stale_active_retried = True
+            print(f"  注意: {stale_hint[0]}")
+        if kind is None:
+            self._activate_error = self._activate_error or "no usable instance"
+            return None, None
+        if kind == "dispatch":
+            # A fresh instance we started must be quit by the caller later.
+            self._dispatch_started = True
+        return kind, instance
+
+    def connect_to_cad(self) -> bool:
+        """连接到 AutoCAD 应用程序 - 优化版
+
+        Uses dynamic versioned ProgID discovery so future AutoCAD releases are
+        recognised.  Each candidate ProgID is tried synchronously on the current
+        COM thread/apartment (this module runs inside a dedicated subprocess, so
+        a hung COM server is bounded and reclaimed by the parent subprocess
+        timeout).  A registered-but-hung ProgID is skipped so the next candidate
+        is tried, and an actionable diagnostic is recorded in ``self.last_error``
+        distinguishing activation failure from "not installed".
+        """
+        cad_prog_ids = self._autocad_prog_ids()
+
+        self.last_error = None
+        print("正在连接 AutoCAD...")
+
+        outcomes = []
         for prog_id in cad_prog_ids:
-            try:
-                self.app = win32com.client.GetActiveObject(prog_id)
+            kind, instance = self._try_activate_once(prog_id)
+            if kind in ("active", "dispatch") and instance is not None:
+                self.app = instance
                 self._set_background_mode()
-                print(f"✓ 连接到现有 {prog_id} 实例")
-                self.connected = True
-                return True
-            except:
-                continue
-        
-        # 创建新实例
-        for prog_id in cad_prog_ids:
-            try:
-                self.app = win32com.client.Dispatch(prog_id)
-                self._set_background_mode()
-                print(f"✓ 启动新的 {prog_id} 实例")
-                self.connected = True
-                # 设置CAD为不可见模式以提升性能
                 try:
                     self.app.Visible = False
-                    print("✓ 设置CAD为后台模式")
-                except:
+                except Exception:
                     pass
+                self.connected = True
+                print(f"[OK] 连接/启动 {prog_id} 实例 ({kind})")
+                self.last_error = None
                 return True
-            except Exception as e:
-                continue
-        
-        print("✗ 无法连接到任何CAD程序")
+            outcomes.append(
+                f"{prog_id}: activation failed "
+                f"({self._activate_error or 'COM error'})"
+            )
+
+        # 诊断：区分“未注册/未运行”与“已注册但激活失败”。
+        registered_any = False
+        try:
+            from app.functions import autocad_discovery as _disc
+            registered_any = _disc.any_autocad_registered()
+        except Exception:
+            registered_any = False
+
+        if registered_any:
+            reason = (
+                "AutoCAD is registered on this host but COM activation failed: "
+                f"{'; '.join(outcomes) or 'unknown COM error'}. Check bitness "
+                "match, run as a user with AutoCAD COM permissions, confirm the "
+                "AutoCAD installation is not damaged, and close stray acad.exe "
+                "processes."
+            )
+        else:
+            reason = (
+                "No AutoCAD COM registration or running acad.exe was detected on "
+                "this host. Install/register AutoCAD, or configure another DWG "
+                "backend (ODA / LibreDWG)."
+            )
+        self.last_error = reason
+        print(f"[ERROR] 无法连接到任何 AutoCAD 程序：{reason}")
         return False
-    
+
+
     def open_dwg_file(self, dwg_path: str) -> bool:
         """
         打开DWG文件 - 优化版
@@ -117,14 +208,14 @@ class AutoCADConverter:
             # 尝试多种打开方式
             try:
                 self.doc = self.app.Documents.Open(abs_path)
-                print("✓ 使用Documents.Open方法成功打开")
+                print("[OK] 使用Documents.Open方法成功打开")
                 return True
             except Exception as e:
                 print(f"Documents.Open失败: {e}")
             
             try:
                 self.doc = self.app.ActiveDocument.Application.Documents.Open(abs_path)
-                print("✓ 使用ActiveDocument方法成功打开")
+                print("[OK] 使用ActiveDocument方法成功打开")
                 return True
             except Exception as e:
                 print(f"ActiveDocument方法失败: {e}")
@@ -190,10 +281,10 @@ class AutoCADConverter:
             analysis['layers'] = list(analysis['layers'])
             analysis['entity_types'] = dict(analysis['entity_types'])  # 转回普通dict
             
-            print(f"\n✓ 分析完成: {processed} 个实体")
+            print(f"\n[OK] 分析完成: {processed} 个实体")
             
         except Exception as e:
-            print(f"\n✗ 分析实体时出错: {e}")
+            print(f"\n[ERROR] 分析实体时出错: {e}")
             
         return analysis
     
@@ -311,7 +402,7 @@ class AutoCADConverter:
                 elapsed = time.time() - start_time
                 file_size = os.path.getsize(abs_output_path) if os.path.exists(abs_output_path) else 0
                 
-                print(f"✓ DXF转换成功")
+                print(f"[OK] DXF转换成功")
                 print(f"  - 耗时: {elapsed:.2f}秒")
                 print(f"  - 文件大小: {file_size / 1024 / 1024:.2f} MB")
                 return True
@@ -343,12 +434,12 @@ class AutoCADConverter:
                                 time.sleep(1)
                                 size2 = os.path.getsize(abs_output_path)
                                 if size1 == size2 and size1 > 0:
-                                    print(f"✓ 命令行转换成功 (耗时: {wait_time}秒)")
+                                    print(f"[OK] 命令行转换成功 (耗时: {wait_time}秒)")
                                     return True
                             except:
                                 pass
                     
-                    print("✗ 命令行转换超时或文件未生成")
+                    print("[ERROR] 命令行转换超时或文件未生成")
                     
                 except Exception as e:
                     print(f"命令行转换失败: {e}")
@@ -356,7 +447,7 @@ class AutoCADConverter:
             return False
             
         except Exception as e:
-            print(f"✗ DXF转换失败: {e}")
+            print(f"[ERROR] DXF转换失败: {e}")
             return False
     
     def close_document(self):
@@ -367,7 +458,7 @@ class AutoCADConverter:
             try:
                 self.doc.Close(False)  # 不保存
                 self.doc = None
-                print("✓ 文档已关闭")
+                print("[OK] 文档已关闭")
             except Exception as e:
                 print(f"关闭文档时出错: {e}")
     
@@ -380,15 +471,24 @@ class AutoCADConverter:
                 self.close_document()
             
             if self.app:
-                # 恢复CAD可见性
-                try:
-                    self.app.Visible = True
-                except:
-                    pass
+                # If this connection started (Dispatch) the CAD instance, quit it
+                # so we do not leave a stray acad.exe / ROT entry behind.
+                if getattr(self, "_dispatch_started", False):
+                    try:
+                        self.app.Quit()
+                    except Exception:
+                        pass
+                    self._dispatch_started = False
+                else:
+                    # Restore visibility only for an instance we merely attached to.
+                    try:
+                        self.app.Visible = True
+                    except Exception:
+                        pass
                 self.app = None
             
             self.connected = False
-            print("✓ 已断开CAD连接")
+            print("[OK] 已断开CAD连接")
             
         except Exception as e:
             print(f"断开连接时出错: {e}")
@@ -451,7 +551,7 @@ def main():
                     size_mb = os.path.getsize(output_dxf) / 1024 / 1024
                     print(f"输出文件: {output_dxf} ({size_mb:.2f} MB)")
             else:
-                print("\n✗ 转换失败")
+                print("\n[ERROR] 转换失败")
                 
         except KeyboardInterrupt:
             print("\n用户中断操作")

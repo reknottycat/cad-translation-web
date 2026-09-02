@@ -116,6 +116,7 @@ Run the security audit with:
 | [FRONTEND_API_SPEC.md](docs/modern/FRONTEND_API_SPEC.md) | Frontend API integration guide |
 | [LLM_PROVIDERS.md](docs/modern/LLM_PROVIDERS.md) | Supported LLM providers and configuration |
 | [CAD_CONVERTER_BACKENDS.md](docs/modern/CAD_CONVERTER_BACKENDS.md) | DWG conversion backends |
+| [AUTOCAD_COM_DETECTION.md](docs/modern/AUTOCAD_COM_DETECTION.md) | AutoCAD COM auto-detection & deployment prerequisites |
 | [RELEASE_SCALE.md](docs/modern/RELEASE_SCALE.md) | Packaging and release flow |
 | [PROJECT_NAVIGATION.md](docs/modern/PROJECT_NAVIGATION.md) | Project directory navigation |
 | [AGENTS.md](AGENTS.md) | Development guide for AI assistants |
@@ -170,6 +171,35 @@ The system is designed to support multiple users processing CAD tasks concurrent
 - **Config file safety**: Concurrent saves to the runtime config JSON are serialized through the same file-lock mechanism, preventing corruption or lost updates.
 - **Excel output uniqueness**: The `/api/translation/excel` endpoint generates UUID-prefixed output filenames, preventing same-name uploads from overwriting each other's results.
 - **COM converter serialization**: DWG-to-DXF conversions via COM are limited to one at a time per process (`CAD_COM_CONCURRENCY` env var, default 1) to avoid COM instance races.
+- **AutoCAD COM auto-detection**: the backend discovers AutoCAD by enumerating
+  registered versioned ProgIDs (future releases supported) plus the process table,
+  and only treats AutoCAD as usable when a COM bridge script is present *and* the
+  application is registered/running. See
+  [AUTOCAD_COM_DETECTION.md](docs/modern/AUTOCAD_COM_DETECTION.md).
+- **Bounded COM activation**: registered ≠ confirmed activatable. 浩辰 (GStarCAD)
+  / 中望 (ZWCAD) / AutoCAD activation is bounded by one knob
+  (`CAD_COM_ACTIVATION_TIMEOUT`, default 30s -- a real AutoCAD 2026 cold start is
+  ~6.5s so the default leaves margin). Probing is classification-only and keeps
+  COM in the worker thread's own apartment (never hands an object across
+  threads); real conversions activate synchronously inside a dedicated COM
+  subprocess so activation/open/convert/release stay in one COM
+  thread/process and the parent subprocess timeout reclaims a hung server. A
+  registered-but-hung or broken COM server is classified
+  `activation_timeout`/`activation_failed` and skipped instead of blocking; auto
+  mode does not put a merely-registered-but-unusable backend first in the
+  fallback chain. ProgIDs are de-duplicated case-insensitively.
+- **Stale-proxy resilience after probing**: probing may start then quit a
+  CAD instance whose ROT entry lingers briefly; an immediate connect can
+  then bind via `GetActiveObject` to a stale proxy. The probe confirms the
+  launched CAD left the ROT after quit, and the connection layer validates
+  `Version`/`Documents` and automatically re-`Dispatch`s a fresh instance
+  when it meets a stale active proxy, so detection/conversion leave no
+  acad.exe / ROT residue.
+- **Deployment boundary**: AutoCAD installation and COM are capabilities of the
+  **backend Windows host**, not of any browser client. This remains a **single-
+  tenant** system with **no per-user task isolation**; auto-detection only means
+  the host can find the AutoCAD it runs against. The backend never auto-installs
+  AutoCAD.
 - **LLM rate limiting**: RPM/TPM buckets are per-process. When deploying multiple workers, each process maintains its own rate-limit state; consider allocating limits accordingly.
 
 ### Security & Authorization Model

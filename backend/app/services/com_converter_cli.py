@@ -61,7 +61,9 @@ def main() -> int:
         converter = converter_class()
 
         if not converter.connect_to_cad():
-            raise RuntimeError("connect_to_cad() returned False")
+            diag = getattr(converter, "last_error", None)
+            msg = str(diag) if diag else "connect_to_cad() returned False"
+            raise RuntimeError(msg)
         if not converter.open_dwg_file(args.dwg):
             raise RuntimeError("open_dwg_file() returned False")
         if not converter.convert_to_dxf_optimized(args.output):

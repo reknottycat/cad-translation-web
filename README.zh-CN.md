@@ -137,6 +137,7 @@ cad-code/
 | [FRONTEND_API_SPEC.md](docs/modern/FRONTEND_API_SPEC.md) | 前端接口规范 |
 | [LLM_PROVIDERS.md](docs/modern/LLM_PROVIDERS.md) | LLM 厂商与配置 |
 | [CAD_CONVERTER_BACKENDS.md](docs/modern/CAD_CONVERTER_BACKENDS.md) | DWG 转换后端 |
+| [AUTOCAD_COM_DETECTION.md](docs/modern/AUTOCAD_COM_DETECTION.md) | AutoCAD COM 自动检测与部署前置条件 |
 | [RELEASE_SCALE.md](docs/modern/RELEASE_SCALE.md) | 打包发布流程 |
 | [PROJECT_NAVIGATION.md](docs/modern/PROJECT_NAVIGATION.md) | 项目目录导航 |
 | [AGENTS.md](AGENTS.md) | AI 助手开发指南 |
@@ -196,6 +197,17 @@ powershell -ExecutionPolicy Bypass -File scripts/build_scale_exe_nuitka.ps1
 - **集中式 `task_id` 校验**：凡接受 `task_id` 的任务端点与服务方法，都会在其拼接进任意文件系统路径前校验其是否符合系统生成的形态（8 位小写十六进制，`uuid4().hex[:8]`）。含 `../`、`.`、路径分隔符或任何非十六进制文本的取值会被以 `400` 拒绝，调用方无法读取/下载/删除/回填任务树之外的路径。
 
 **单租户模型**：本系统是面向内部部署的**单租户** Web 应用，**没有 per-user 账户体系**，不提供同一实例上不同用户间的数据隔离；一台实例上的所有项目/任务/文件同属同一逻辑租户。
+
+**AutoCAD COM 自动检测与部署边界**：
+
+- 后端通过**枚举已注册的版本化 ProgID**（`AutoCAD.Application.<主版本>[.<次版本>]`，兼容 32/64 位注册表视图）并结合**进程表**来探测 AutoCAD；代码不把版本号写死到 2022，未来新版本无需改代码即可识别。详细探测逻辑位于 `backend/app/functions/autocad_discovery.py`，通过 mock `winreg` / 进程表 / `win32com` 即可运行单测，无需真实 AutoCAD。
+- 仅当 **COM 桥接脚本存在** 且 **应用程序已注册或正在运行** 时才判定为可用；**仅有 Python 脚本不代表 AutoCAD 已安装**。
+- 连接层（`backend/app/services/autocad_converter.py`）在子进程超时内运行，按探测到的版本化 ProgID 由新到旧尝试，连接失败会记录具体原因（`activation_failed` / `not_detected` 等）而非静默吞掉异常，也不会泄漏进程或文档。
+- 自动模式会按探测结果筛除确定不可用的 COM 后端，同时保留 `haochen_com` → `autocad_com` → ODA/LibreDWG 的回退链；COM 转换仍默认单实例串行（`CAD_COM_CONCURRENCY=1`）。
+- **有界 COM 激活**：**注册 ≠ 一定可激活**。浩辰（GStarCAD）/ 中望（ZWCAD）/ AutoCAD 的激活统一由单一环境变量 `CAD_COM_ACTIVATION_TIMEOUT` 约束（默认 **30s**，真实 AutoCAD 2026 冷启动约 6.5s，留足余量）。探测阶段为**仅分类**：COM 对象在 worker 线程自己的 apartment 内完成激活/读取 `Version`/`Documents`/释放，**绝不跨线程交给调用方**；真实转换在专用 COM 子进程内**同步**激活，激活/打开文档/转换/释放保持在同一 COM 线程/进程，父进程子进程超时可做进程级回收，避免遗留 `acad.exe`。对「已注册但激活超时/失败（挂起、位宽/权限/损坏）」的 COM 后端归类为 `activation_timeout` / `activation_failed` 并跳过，避免长时间卡住；自动模式不把「仅注册但不可激活」的浩辰/中望误判为可用并排在回退链最前。ProgID 列表做**大小写不敏感去重**，避免重复尝试与诊断噪声。
+- **探测后紧接连接的陈旧 proxy 韧性**：探测可能启动并立即 `Quit` 一个 CAD 实例，其 ROT 条目会短暂残留；紧接着的连接若用 `GetActiveObject` 可能拿到指向正在退出的实例的**陈旧 active proxy**。现在探测在 `Quit` 后会等待该实例离开 ROT（有界，`DEFAULT_QUIT_CONFIRM_TIMEOUT`），连接层则校验 `Version`/`Documents`，遇到不可用的陈旧 active proxy 自动改用 `Dispatch` 重新启动一个可用实例，从而避免探测/转换留下 `acad.exe` / ROT 残留。
+- **AutoCAD 安装与 COM 能力属于运行后端的 Windows 主机，不属于任何浏览器客户端**；本系统仍为**单租户**，不提供 per-user 任务隔离。所谓「自动检测」仅指后端能在自身主机上找到所调用的 AutoCAD。后端**不会自动安装 AutoCAD**；缺失时应改用 ODA / LibreDWG 等后端，或安装并注册 AutoCAD。
+- 参见 [AUTOCAD_COM_DETECTION.md](docs/modern/AUTOCAD_COM_DETECTION.md)。
 
 - **`ENABLE_ADMIN_GUARD` 默认开启且 fail-closed**。在 `backend/.env` 设置 `ADMIN_API_TOKEN` 后，所有敏感任务/项目/文件/配置/翻译端点都要求 Token；调用方以 `X-Admin-Token: <token>` 或 `Authorization: Bearer <token>` 认证。
 - **fail-closed 行为**：若 `ENABLE_ADMIN_GUARD=true` 但 `ADMIN_API_TOKEN` 留空，所有受保护端点返回 `503 Service Unavailable`，避免「想开启保护却忘记配置凭证」导致敏感端点被静默暴露；不存在静默 fail-open 路径。

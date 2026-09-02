@@ -4,3 +4,5 @@
 backend/app/routers/files.py whitespace=cr-at-eol
 backend/app/routers/projects.py whitespace=cr-at-eol
 backend/app/database.py whitespace=cr-at-eol
+backend/app/services/autocad_converter.py whitespace=cr-at-eol
+backend/app/services/haochen_optimized_converter.py whitespace=cr-at-eol
