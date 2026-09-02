@@ -229,6 +229,8 @@ def test_isolated_build_generates_wheel_and_sdist_reads_version(tmp_path):
         cwd=str(stage_harness),
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     assert proc.returncode == 0, (
         f"isolated build failed\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
@@ -340,3 +342,205 @@ def test_all_delivery_launchers_are_written():
     assert '%PYTHON% %PYTHON_ARGS% "%BACKEND_ENTRY%"' in launcher, (
         "start_delivery.bat must run the backend with %PYTHON% %PYTHON_ARGS%"
     )
+
+
+# ---------------------------------------------------------------------------
+# Release-gate PowerShell build regression (Issue #14 / gstack OneDrive probe)
+#
+# The probe build showed the delivered ZIP carried dev-only content the build
+# script was supposed to exclude: backend/.venv (~7114 files), server*.log /
+# *.stdout.log / *.stderr.log, backend/app/__pycache__ and
+# cli/cad_translate/__pycache__, .pyc files etc.  These tests really run
+# build_scale.ps1 (via pwsh when available) against a controlled dirty staging
+# workspace and audit the produced ZIP, mirroring the Windows OneDrive probe.
+# ---------------------------------------------------------------------------
+
+# Dev-only artifacts the delivered package must never contain (matched against
+# the ZIP's normalized '/'-path entry names and against a pathname substring).
+_BANNED_SUBSTRINGS = (
+    "/.venv/", "/venv/", "/env/", "__pycache__", ".pyc",
+    ".log",  # server*.log / *.stdout.log / *.stderr.log
+    ".db", "runtime_config.local.json", "/.env", "local_settings.py",
+    "db.sqlite3", ".egg-info", "/outputs/", "/uploads/", "/temp/",
+    "/tests/", "conftest.py", "/test_",
+)
+
+
+def _is_banned_entry(name: str) -> bool:
+    """True when an entry name must not appear in the release ZIP.
+
+    ``.env.example`` is the intended shipped template (not a secret) and must
+    be allowed through; every other ``.env*`` local config / secret is banned.
+    """
+    if name.endswith("/.env.example") or "/.env.example" in name:
+        return False
+    return any(b in name for b in _BANNED_SUBSTRINGS)
+
+
+def _pwsh():
+    """Locate a runnable PowerShell, or None when absent (then tests skip)."""
+    return shutil.which("pwsh") or shutil.which("powershell")
+
+
+def _stage_dirty_release_workspace(tmp_path):
+    """Build a controlled workspace exactly like the dirty Windows probe root:
+    real backend + agent-harness source, a stub frontend/dist + tools, plus the
+    dev-only clutter (a .venv, __pycache__/.pyc, server logs, a dev db, local
+    config/secret, test dirs & scripts) that must be excluded from the ZIP."""
+    root = tmp_path / "probe"
+    (root / "backend").mkdir(parents=True)
+    # Real runtime sources the package must keep.
+    shutil.copytree(REPO / "backend", root / "backend", dirs_exist_ok=True)
+    shutil.copytree(REPO / "agent-harness", root / "agent-harness", dirs_exist_ok=True)
+    if (REPO / "docs" / "modern").exists():
+        shutil.copytree(REPO / "docs" / "modern", root / "docs" / "modern", dirs_exist_ok=True)
+    shutil.copy2(REPO / "requirements.txt", root / "requirements.txt")
+    (root / "scripts").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(BUILD_SCRIPT, root / "scripts" / "build_scale.ps1")
+    # frontend/dist + tools are runtime pieces required by the build (skipped in CI).
+    dist = root / "frontend" / "dist"
+    dist.mkdir(parents=True)
+    (dist / "index.html").write_text("<html><body>probe</body></html>", encoding="utf-8")
+    (root / "tools" / "libredwg").mkdir(parents=True)
+    (root / "tools" / "libredwg" / "dwg2dxf.exe").write_bytes(b"MZ probe")
+
+    # --- inject the dev-only clutter reported by the OneDrive probe ---
+    # backend/.venv (a real venv subtree with many files).
+    venv = root / "backend" / ".venv" / "Lib" / "site-packages" / "demo"
+    venv.mkdir(parents=True)
+    for i in range(20):
+        (venv / f"m_{i}.py").write_text(f"x = {i}\n", encoding="utf-8")
+    (root / "backend" / ".venv" / "pyvenv.cfg").write_text("home = demo\n", encoding="utf-8")
+    # __pycache__ + stray .pyc under backend and under the CLI package.
+    for rel in ("backend/app", "backend/services", "agent-harness/cad_translate"):
+        pc = root / rel / "__pycache__"
+        pc.mkdir(parents=True, exist_ok=True)
+        (pc / "mod.cpython-312.pyc").write_bytes(b"\x00\x01\x02")
+    # server run logs at the backend root.
+    for name in ("server.log", "server.stdout.log", "server.stderr.log"):
+        (root / "backend" / name).write_text("run\n", encoding="utf-8")
+    # a 4th standalone log as the probe reported "4 server*.log"-style entries.
+    (root / "backend" / "app" / "translation.log").write_text("run\n", encoding="utf-8")
+    # dev database + local config / secrets + local settings.
+    (root / "backend" / "cad_translation.db").write_bytes(b"SQLite format 3\x00")
+    (root / "backend" / "config").mkdir(parents=True, exist_ok=True)
+    (root / "backend" / "config" / "runtime_config.local.json").write_text(
+        '{"api_key":"sk-probe-secret"}\n', encoding="utf-8"
+    )
+    (root / "backend" / "config" / "local_settings.py").write_text(
+        "DEBUG=True\n", encoding="utf-8"
+    )
+    (root / "backend" / ".env").write_text("ADMIN_API_TOKEN=secret\n", encoding="utf-8")
+    # test dirs and ad-hoc test scripts anywhere (incl. inside backend/app).
+    (root / "backend" / "tests").mkdir(parents=True, exist_ok=True)
+    (root / "backend" / "tests" / "test_dummy.py").write_text("def test(): pass\n")
+    (root / "backend" / "app" / "test_something.py").write_text("def test(): pass\n")
+    (root / "backend" / "conftest.py").write_text("import pytest\n")
+    return root
+
+
+@pytest.mark.skipif(_pwsh() is None, reason="PowerShell (pwsh/powershell) is not installed")
+def test_real_powershell_build_excludes_dev_artifacts_and_keeps_runtime(tmp_path):
+    """Really run build_scale.ps1 (as the Windows probe does) and audit the ZIP:
+    the dirty dev-only clutter (.venv, __pycache__/.pyc, *.log, *.db, .env,
+    local config/secrets, tests, test scripts) must be absent while the CLI,
+    frontend/dist and necessary runtime files must remain.  The script has no
+    Windows-only COM dependency when built with -SkipFrontendBuild, so pwsh can
+    run it unchanged here."""
+    root = _stage_dirty_release_workspace(tmp_path)
+    out_name = "scale_release_probe_test"
+    zip_name = "scale_release_probe_test.zip"
+
+    proc = subprocess.run(
+        [_pwsh(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+         str(root / "scripts" / "build_scale.ps1"),
+         "-SkipFrontendBuild", "-OutDirName", out_name, "-ZipName", zip_name],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    assert proc.returncode == 0, (
+        f"build_scale.ps1 failed\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+    )
+
+    release = root / out_name
+    zip_path = root / zip_name
+    assert release.is_dir(), f"release dir missing: {release}"
+    assert zip_path.is_file(), f"zip missing: {zip_path}"
+
+    # ---- 1) Banned dev-only content must be entirely absent ----
+    import zipfile
+
+    with zipfile.ZipFile(zip_path) as zf:
+        entries = [e.filename.replace("\\", "/") for e in zf.infolist()]
+
+    leaked = sorted(n for n in entries if _is_banned_entry(n))
+    assert not leaked, f"release ZIP leaked dev-only artifacts: {leaked}"
+
+    # The .venv subtree would have pulled in hundreds of files; assert nothing
+    # under any venv dir survived.
+    assert not any("/.venv/" in n for n in entries)
+
+    # ---- 2) Required runtime pieces must remain ----
+    required = [
+        "backend/run_server.py",
+        "backend/app/main.py",
+        "frontend/dist/index.html",
+        "cli/cad_translate/cli.py",
+        "cli/setup.py",
+        "tools/libredwg/dwg2dxf.exe",
+        "requirements.txt",
+        "start_delivery.bat",
+        "cad-cli.bat",
+        "install_cli.bat",
+        # The .env TEMPLATE (not a secret) is an intended deliverable.
+        "backend/.env.example",
+    ]
+    missing = [r for r in required if r not in entries]
+    assert not missing, f"release ZIP is missing required files: {missing}"
+
+
+@pytest.mark.skipif(_pwsh() is None, reason="PowerShell (pwsh/powershell) is not installed")
+def test_real_powershell_build_secret_guard_is_fail_closed(tmp_path):
+    """The fail-closed secret guard (a hard throw, not a filter) must still be
+    the last line of defence: if an exclusion rule ever lets a secret reach the
+    staging dir, the build must abort with a non-zero exit code and refuse to
+    write a package -- never silently ship a .env / runtime_config.local.json.
+    Here we deliberately strip the secret exclusions from a scratch copy of the
+    build script so a secret WOULD be copied; the guard must then abort."""
+
+    root = _stage_dirty_release_workspace(tmp_path)
+    # Scratch copy of the script with the secret exclusions removed so the
+    # secret files would otherwise make it into the staging dir.
+    scratch = root / "scripts" / "build_no_secret_excl.ps1"
+    script_text = (root / "scripts" / "build_scale.ps1").read_text(encoding="utf-8")
+    script_text = script_text.replace(
+        "    '(^|/)\\.env$',\n    '(^|/)\\.env\\.(?!example$)',\n"
+        "    '(^|/)runtime_config\\.local\\.json$',",
+        "",
+    )
+    scratch.write_text(script_text, encoding="utf-8")
+
+    proc = subprocess.run(
+        [_pwsh(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(scratch),
+         "-SkipFrontendBuild",
+         "-OutDirName", "scale_release_probe_test",
+         "-ZipName", "scale_release_probe_test.zip"],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    combined = f"{proc.stdout}\n{proc.stderr}"
+    # Fail-closed: must abort and never produce the zip.
+    assert proc.returncode != 0, (
+        f"secret guard did not abort a build that staged a secret:\n{combined}"
+    )
+    assert "Refusing to package secret files" in combined, (
+        f"secret guard message missing from output:\n{combined}"
+    )
+    zip_path = root / "scale_release_probe_test.zip"
+    assert not zip_path.exists(), "a package with secrets must never be written"

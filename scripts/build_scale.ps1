@@ -25,18 +25,24 @@ function Copy-DirectoryContents([string]$SourceDir, [string]$DestinationDir, [st
 
     Get-ChildItem -LiteralPath $SourceDir -Recurse -Force | ForEach-Object {
         $item = $_
-        $relative = $item.FullName.Substring($SourceDir.Length).TrimStart('\')
-        if ([string]::IsNullOrWhiteSpace($relative)) {
+        # Relative path under $SourceDir.  Keep the raw separator form for the
+        # destination path but match exclusions against a copy normalized to '/'
+        # so rules behave identically on Windows ('\') and Unix ('/') and never
+        # depend on a drive/separator quirk (release-gate probe: exclusion must
+        # hold on the Windows OneDrive workspace AND on cross-platform CI).
+        $rawRelative = $item.FullName.Substring($SourceDir.Length).TrimStart('\', '/')
+        if ([string]::IsNullOrWhiteSpace($rawRelative)) {
             return
         }
+        $matchRelative = $rawRelative.Replace('\', '/')
 
         foreach ($pattern in $ExcludePatterns) {
-            if ($relative -match $pattern) {
+            if ($matchRelative -match $pattern) {
                 return
             }
         }
 
-        $target = Join-Path $DestinationDir $relative
+        $target = Join-Path $DestinationDir $rawRelative
         if ($item.PSIsContainer) {
             New-Item -ItemType Directory -Force $target | Out-Null
             return
@@ -290,38 +296,61 @@ if (-not (Test-Path -LiteralPath $frontendDistSource -PathType Container)) {
     throw "frontend/dist directory not found at $frontendDistSource"
 }
 
-Copy-DirectoryContents -SourceDir $backendSource -DestinationDir (Join-Path $outDir "backend") -ExcludePatterns @(
-    '(^|\\)__pycache__(\\|$)',
-    '(^|\\)\.pytest_cache(\\|$)',
-    '(^|\\)tests(\\|$)',
-    '(^|\\)outputs(\\|$)',
-    '(^|\\)uploads(\\|$)',
-    '(^|\\)temp(\\|$)',
-    '(^|\\)\.env$',
-    '(^|\\)\.env\.(?!example$)',
-    '(^|\\)runtime_config\.local\.json$',
-    '\.db$',
-    '(^|\\)README_MODERN\.md$',
-    '(^|\\)test_.*\.py$',
-    '(^|\\)simple_test\.py$',
-    '(^|\\)setup_and_test\.py$',
-    '(^|\\)quick_start\.py$',
-    '(^|\\)run_celery\.py$'
+# ---------------------------------------------------------------------------
+# Release-gate exclusion rules (Issue #14 acceptance): the delivered package
+# must NOT carry dev-only content -- virtual envs, byte caches, logs, test
+# dirs/scripts, databases or local config/secrets.  Each pattern is applied to
+# a '/' -normalized relative path (see Copy-DirectoryContents) so it holds
+# identically on the Windows OneDrive probe workspace and on cross-platform CI.
+# Naming a directory segment prunes its whole subtree (a .venv is not descended).
+# ---------------------------------------------------------------------------
+$ReleaseExcludes = @(
+    # Virtual environments (any depth / any common name).
+    '(^|/)(\.venv|venv|env|ENV)(/|$)',
+    # Byte-compiled caches and pickled helpers.
+    '(^|/)__pycache__(/|$)',
+    '(^|/)\.pytest_cache(/|$)',
+    '(^|/)\.mypy_cache(/|$)',
+    '(^|/)\.ruff_cache(/|$)',
+    '\.pyc$',
+    # Test directories and ad-hoc test scripts (any depth).
+    '(^|/)(tests|test|testing)(/|$)',
+    '(^|/)test_.*\.py$',
+    '(^|/)conftest\.py$',
+    # Dev databases and local config / secrets.
+    '(^|/)\.env$',
+    '(^|/)\.env\.(?!example$)',
+    '(^|/)runtime_config\.local\.json$',
+    '(^|/)local_settings\.py$',
+    '(^|/)db\.sqlite3$',
+    '\.(db|sqlite3?)$',
+    # Runtime logs from local backend/CLI runs (probe: server*.log / *.stdout.log).
+    '\.log$',
+    # Local generated scratch/output dirs.
+    '(^|/)(outputs|uploads|temp|logs)(/|$)',
+    # Python packaging leftovers that should never ship.
+    '(^|/)build(/|$)',
+    '(^|/)dist(/|$)',
+    '(^|/)\.egg-info(/|$)',
+    # Misc files not meant for delivery.
+    '(^|/)README_MODERN\.md$',
+    '(^|/)simple_test\.py$',
+    '(^|/)setup_and_test\.py$',
+    '(^|/)quick_start\.py$',
+    '(^|/)run_celery\.py$'
 )
+
+Copy-DirectoryContents -SourceDir $backendSource -DestinationDir (Join-Path $outDir "backend") -ExcludePatterns $ReleaseExcludes
 
 Copy-DirectoryContents -SourceDir $frontendDistSource -DestinationDir (Join-Path $outDir "frontend\dist")
 Copy-DirectoryContents -SourceDir $toolsSource -DestinationDir (Join-Path $outDir "tools")
 Copy-DirectoryContents -SourceDir $docsModernSource -DestinationDir (Join-Path $outDir "docs\modern") -ExcludePatterns @(
-    '(^|\\)AUTO_FILE_INDEX\.md$'
+    '(^|/)AUTO_FILE_INDEX\.md$'
 )
 # --- Bundle the cad-translate CLI source (maintained in agent-harness/) ---
 $cliSource = Join-Path $rootPath "agent-harness\cad_translate"
 if (Test-Path -LiteralPath $cliSource -PathType Container) {
-    Copy-DirectoryContents -SourceDir $cliSource -DestinationDir (Join-Path $outDir "cli\cad_translate") -ExcludePatterns @(
-        '(^|\\)__pycache__(\\|$)',
-        '(^|\\)\.pytest_cache(\\|$)',
-        '(^|\\)tests(\\|$)'
-    )
+    Copy-DirectoryContents -SourceDir $cliSource -DestinationDir (Join-Path $outDir "cli\cad_translate") -ExcludePatterns $ReleaseExcludes
     # Copy CLI packaging metadata so `pip install -e ./cli` works in the delivery.
     $cliPkgDir = Join-Path $outDir "cli"
     New-Item -ItemType Directory -Force $cliPkgDir | Out-Null
