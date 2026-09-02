@@ -11,6 +11,7 @@ from typing import Any, Dict, List
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from app.utils.locking import file_lock
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -270,9 +271,10 @@ def load_runtime_config(path: Path | None = None) -> Dict[str, Any]:
     if not runtime_path.exists():
         return {}
 
-    try:
-        data = json.loads(runtime_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+    with file_lock(runtime_path):
+        try:
+            data = json.loads(runtime_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
 
     return data if isinstance(data, dict) else {}

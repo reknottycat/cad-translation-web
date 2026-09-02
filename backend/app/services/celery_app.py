@@ -92,6 +92,7 @@ def update_task_status(
 ) -> None:
     """Persist task status to the database when a record exists."""
 
+    db = None
     try:
         db = SessionLocal()
         task = db.query(ProcessingTask).filter(ProcessingTask.task_id == task_id).first()
@@ -111,9 +112,13 @@ def update_task_status(
 
             db.commit()
             logger.info("task_status_updated", task_id=task_id, status=status, progress=progress)
-        db.close()
     except Exception as exc:
+        if db is not None:
+            db.rollback()
         logger.error("task_status_update_failed", task_id=task_id, error=str(exc))
+    finally:
+        if db is not None:
+            db.close()
 
 
 @task_prerun.connect

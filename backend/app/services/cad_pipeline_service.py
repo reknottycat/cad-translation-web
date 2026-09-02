@@ -12,6 +12,7 @@ from pathlib import Path
 from tempfile import mkstemp
 from typing import Any, Callable
 
+import structlog
 import pandas as pd
 from fastapi import UploadFile
 
@@ -20,10 +21,13 @@ from app.services.cad_text_processor import cad_text_processor
 from app.services.alibaba_ai_translation_service import alibaba_ai_translation_service
 from app.services.docutranslate_adapter import CadTextRecord, DocuTranslateConfig, DocuTranslateJsonAdapter
 from app.utils.file_utils import get_safe_filename, resolve_within_directory
+from app.utils.locking import atomic_write_json, atomic_write_text, file_lock
 from app.workflow.pipeline import CADPipeline, get_pipeline
 from app.functions.dwg_converter import DWGConverter
 from app.functions.text_extractor import TextExtractor
 from app.functions.text_applier import TextApplier
+
+logger = structlog.get_logger(__name__)
 
 
 class TaskCancelledError(RuntimeError):
@@ -100,20 +104,25 @@ class CADPipelineService:
     def _append_log(self, task_id: str, message: str) -> None:
         log_path = self._task_log_path(task_id)
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(f"[{timestamp}] {message}\n")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with file_lock(log_path):
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"[{timestamp}] {message}\n")
+                f.flush()
 
     def _save_checkpoint(self, task_id: str, translations: list[dict[str, str]]) -> None:
         checkpoint_path = self._task_checkpoint_path(task_id)
-        with open(checkpoint_path, "w", encoding="utf-8") as f:
-            json.dump(translations, f, ensure_ascii=False, indent=2)
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._task_meta_lock(task_id):
+            atomic_write_json(checkpoint_path, translations)
 
     def _load_checkpoint(self, task_id: str) -> list[dict[str, str]]:
         checkpoint_path = self._task_checkpoint_path(task_id)
         if not checkpoint_path.exists():
             return []
-        with open(checkpoint_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        with self._task_meta_lock(task_id):
+            with open(checkpoint_path, "r", encoding="utf-8") as f:
+                return json.load(f)
 
     def _get_translation_runtime(self) -> dict[str, Any]:
         runtime = dict(alibaba_ai_translation_service.get_runtime_summary())
@@ -131,10 +140,11 @@ class CADPipelineService:
         config_path = self.settings.get_runtime_config_path()
         if not config_path.exists():
             return {}
-        try:
-            payload = json.loads(config_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
+        with file_lock(config_path):
+            try:
+                payload = json.loads(config_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return {}
         return payload if isinstance(payload, dict) else {}
 
     @staticmethod
@@ -324,20 +334,23 @@ class CADPipelineService:
         metadata_path = self._task_meta_path(task_id)
         if not metadata_path.exists():
             raise FileNotFoundError(f"Task not found: {task_id}")
-        return json.loads(metadata_path.read_text(encoding="utf-8"))
+        # Use a shared lock so concurrent readers see a consistent snapshot.
+        with self._task_meta_lock(task_id):
+            return json.loads(metadata_path.read_text(encoding="utf-8"))
 
     def _save_task(self, task_id: str, payload: dict[str, Any]) -> None:
         metadata_path = self._task_meta_path(task_id)
-        metadata_path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        # Atomic write prevents readers from seeing a truncated/partial JSON.
+        with self._task_meta_lock(task_id):
+            atomic_write_json(metadata_path, payload)
 
-    def _task_meta_lock(self, task_id: str) -> threading.Lock:
+    def _task_meta_lock(self, task_id: str) -> threading.RLock:
+        # Use an RLock so the same thread can re-acquire it (e.g. when
+        # _load_task is called from within _update_task).
         with self._task_meta_locks_guard:
             lock = self._task_meta_locks.get(task_id)
             if lock is None:
-                lock = threading.Lock()
+                lock = threading.RLock()
                 self._task_meta_locks[task_id] = lock
             return lock
 
@@ -1231,8 +1244,14 @@ class CADPipelineService:
     def list_tasks(self) -> list[dict[str, Any]]:
         tasks: list[dict[str, Any]] = []
         for metadata_path in self._tasks_root().glob("*/task.json"):
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            tasks.append(self._build_task_summary(metadata))
+            task_id = metadata_path.parent.name
+            try:
+                metadata = self._load_task(task_id)
+                tasks.append(self._build_task_summary(metadata))
+            except (json.JSONDecodeError, OSError, FileNotFoundError) as exc:
+                # A concurrent writer may have been mid-update or the task was deleted.
+                logger.warning("task_meta_read_skipped", task_id=task_id, error=str(exc))
+                continue
         status_rank = {"processing": 0, "error": 1, "queued": 2, "cancelled": 3, "done": 4}
         tasks.sort(
             key=lambda item: (
@@ -1265,18 +1284,22 @@ class CADPipelineService:
     def stop_all_tasks(self) -> dict[str, Any]:
         cancelled_task_ids: list[str] = []
         for metadata_path in self._tasks_root().glob("*/task.json"):
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            task_id = str(metadata.get("task_id") or "").strip()
-            status = str(metadata.get("status") or "").strip().lower()
-            if not task_id or status not in {"processing", "queued"}:
+            task_id = metadata_path.parent.name
+            try:
+                metadata = self._load_task(task_id)
+                status = str(metadata.get("status") or "").strip().lower()
+                if not task_id or status not in {"processing", "queued"}:
+                    continue
+                self._cancelled_task_ids.add(task_id)
+                metadata["status"] = "cancelled"
+                metadata["stage"] = "cancelled"
+                metadata["last_error"] = "Task cancelled by user."
+                metadata["last_activity_at"] = time.time()
+                self._save_task(task_id, metadata)
+                cancelled_task_ids.append(task_id)
+            except (json.JSONDecodeError, OSError, FileNotFoundError) as exc:
+                logger.warning("stop_task_meta_skipped", task_id=task_id, error=str(exc))
                 continue
-            self._cancelled_task_ids.add(task_id)
-            metadata["status"] = "cancelled"
-            metadata["stage"] = "cancelled"
-            metadata["last_error"] = "Task cancelled by user."
-            metadata["last_activity_at"] = time.time()
-            self._save_task(task_id, metadata)
-            cancelled_task_ids.append(task_id)
         return {
             "cancelled_task_ids": cancelled_task_ids,
             "cancelled_count": len(cancelled_task_ids),

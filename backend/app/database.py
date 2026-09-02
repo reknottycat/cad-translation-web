@@ -19,9 +19,19 @@ logger = structlog.get_logger(__name__)
 settings = get_settings()
 
 # 创建数据库引擎
+# SQLite concurrency: set a busy timeout so concurrent readers/writers wait
+# instead of immediately failing with "database is locked". This is important
+# for multi-user access (multiple API workers writing to the same SQLite DB).
+_engine_connect_args = {}
+if "sqlite" in settings.resolve_database_url():
+    _engine_connect_args = {
+        "check_same_thread": False,
+        "timeout": 30,  # seconds to wait for the SQLite lock before failing
+    }
+
 engine = create_engine(
     settings.resolve_database_url(),
-    connect_args={"check_same_thread": False} if "sqlite" in settings.resolve_database_url() else {},
+    connect_args=_engine_connect_args,
     echo=settings.DEBUG
 )
 
@@ -164,11 +174,15 @@ def init_db():
 # 数据库健康检查
 def check_db_health() -> bool:
     """检查数据库连接健康状态"""
+    db = None
     try:
+        from sqlalchemy import text
         db = SessionLocal()
-        db.execute("SELECT 1")
-        db.close()
+        db.execute(text("SELECT 1"))
         return True
     except Exception as e:
         logger.error("数据库健康检查失败", error=str(e))
         return False
+    finally:
+        if db is not None:
+            db.close()

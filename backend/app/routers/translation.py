@@ -141,7 +141,11 @@ async def translate_excel_file(
             temp_input.write(await file.read())
             temp_input_path = temp_input.name
 
-        output_filename = f"translated_{get_safe_filename(file.filename)}"
+        # Use a unique output filename to prevent concurrent uploads with the
+        # same original filename from overwriting each other's results.
+        safe_stem = Path(get_safe_filename(file.filename)).stem.replace(" ", "_")
+        suffix = Path(file.filename).suffix.lower()
+        output_filename = f"translated_{uuid.uuid4().hex}_{safe_stem}{suffix}"
         output_path = settings.get_output_path() / output_filename
 
         try:

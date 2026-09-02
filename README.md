@@ -159,3 +159,21 @@ Development conventions:
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
+
+## Multi-User Concurrency Notes
+
+The system is designed to support multiple users processing CAD tasks concurrently on an internal Windows deployment. Key behaviors:
+
+- **Task isolation**: Each CAD task gets a unique UUID-based task ID and an isolated directory under `outputs/cad_tasks/{task_id}/`. Source files, Excel extractions, translated CAD files, and logs never mix across tasks.
+- **File locking**: Task metadata (`task.json`), translation checkpoints, and runtime config files are protected by atomic writes (temp + rename) and cross-process file locks (`fcntl`/`msvcrt`) to prevent corruption and lost updates under concurrent access.
+- **SQLite concurrency**: A 30-second busy timeout is set so concurrent readers/writers wait instead of failing with "database is locked".
+- **Config file safety**: Concurrent saves to the runtime config JSON are serialized, preventing corruption or lost updates.
+- **Excel output uniqueness**: The `/api/translation/excel` endpoint generates UUID-prefixed output filenames, preventing same-name uploads from overwriting each other's results.
+- **COM converter serialization**: DWG-to-DXF conversions via COM are limited to one at a time per process (`CAD_COM_CONCURRENCY` env var, default 1) to avoid COM instance races.
+- **LLM rate limiting**: RPM/TPM buckets are per-process. When deploying multiple workers, each process maintains its own rate-limit state; consider allocating limits accordingly.
+
+### Known limitations in multi-process mode
+
+- File locks provide cross-process protection for task metadata and config writes.
+- However, in-process `threading.Lock`-based task cancellation (`_cancelled_task_ids`) is not shared across processes. Stop/cancel operations affect the process that initiated them.
+- LLM rate-limit buckets are per-process. Under multi-worker Celery, RPM/TPM quotas may be exceeded by the aggregate of all workers.

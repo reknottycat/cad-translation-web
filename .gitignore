@@ -191,7 +191,6 @@ package-lock.json
 # Superseded/legacy components removed from release repo
 .trans_CAD_gui_V1.0/
 agent-harness/
-tests/
 docs/legacy/
 docs/plans/
 命令行专用/
