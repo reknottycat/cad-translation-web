@@ -36,6 +36,8 @@ def guard_client():
     env_path = Path(env_dir) / ".env"
     # Override the shared test env with guard enabled and two tokens
     original_env_file = os.environ.get("CAD_TRANSLATION_ENV_FILE", "")
+    original_guard = os.environ.get("ENABLE_ADMIN_GUARD")
+    original_token = os.environ.get("ADMIN_API_TOKEN")
     os.environ["CAD_TRANSLATION_ENV_FILE"] = str(env_path)
     os.environ["ENABLE_ADMIN_GUARD"] = "true"
     os.environ["ADMIN_API_TOKEN"] = "admin-token-identity-1"
@@ -58,9 +60,17 @@ def guard_client():
     with TestClient(app) as c:
         yield c, env_dir
 
-    # Restore
+    # Restore ALL modified env vars
     config_module._settings = None
     os.environ["CAD_TRANSLATION_ENV_FILE"] = original_env_file
+    if original_guard is not None:
+        os.environ["ENABLE_ADMIN_GUARD"] = original_guard
+    else:
+        os.environ.pop("ENABLE_ADMIN_GUARD", None)
+    if original_token is not None:
+        os.environ["ADMIN_API_TOKEN"] = original_token
+    else:
+        os.environ.pop("ADMIN_API_TOKEN", None)
 
 
 def test_translation_endpoints_are_guarded(guard_client):

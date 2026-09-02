@@ -26,20 +26,25 @@ def require_admin_access(
 ) -> None:
     """Gate a route behind the single-tenant admin token.
 
-    Security model (single-tenant):
+    Security model (single-tenant, fail-closed):
     - This system has **no per-user accounts**. All data on one instance
-      belongs to the same tenant. `ENABLE_ADMIN_GUARD` (ON by default)
-      provides a coarse "is the caller allowed to touch this instance at all"
-      gate rather than per-user / per-project ownership filtering.
+      belongs to the same tenant. `ENABLE_ADMIN_GUARD` provides a coarse
+      "is the caller allowed to touch this instance at all" gate rather than
+      per-user / per-project ownership filtering.
     - To isolate multiple independent tenants on one host, run a separate
       process per tenant or put a reverse proxy / SSO in front.
-    - When `ENABLE_ADMIN_GUARD` is true (default) and `ADMIN_API_TOKEN` is
-      set, the caller must present a valid token via `X-Admin-Token` or
-      `Authorization: Bearer <token>`.  `task_id` / `project_id` / `file_id`
-      are NOT access credentials.
+    - When `ENABLE_ADMIN_GUARD` is true (default):
+      * If `ADMIN_API_TOKEN` is set, callers must present it via
+        `X-Admin-Token` or `Authorization: Bearer <token>`. `task_id` /
+        `project_id` / `file_id` are NOT access credentials.
+      * If `ADMIN_API_TOKEN` is empty, the instance is **misconfigured**:
+        requests are rejected with `503 Service Unavailable`. This ensures a
+        fail-closed posture — an operator who enables the guard but forgets
+        to configure a token cannot silently expose every sensitive endpoint.
     - When `ENABLE_ADMIN_GUARD=false`, every route is open to any client that
       can reach the HTTP port — suitable only for a trusted single-user
-      deployment on an isolated network.
+      deployment on an isolated network where protection is explicitly
+      turned off.
     """
     settings = get_settings()
     if not settings.ENABLE_ADMIN_GUARD:
@@ -48,12 +53,18 @@ def require_admin_access(
     expected_token = settings.get_admin_token()
     provided_token = x_admin_token or _extract_bearer_token(authorization)
 
-    # If ENABLE_ADMIN_GUARD=true but no token is configured, this instance
-    # cannot validate callers — we treat it as an insecure-but-open trusted
-    # single-tenant deployment rather than block everything.
-    # Operators who need protection must set ADMIN_API_TOKEN in backend/.env.
+    # Fail-closed: guard enabled but no token configured → the operator has
+    # asked for protection yet hasn't provided a credential. We refuse to
+    # serve sensitive routes rather than silently allowing anyone through.
     if not expected_token:
-        return
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "admin guard is enabled but no ADMIN_API_TOKEN is configured. "
+                "Set ADMIN_API_TOKEN in backend/.env to activate protected mode, "
+                "or set ENABLE_ADMIN_GUARD=false for a trusted single-user deployment."
+            ),
+        )
 
     if not provided_token or not hmac.compare_digest(provided_token, expected_token):
         raise HTTPException(

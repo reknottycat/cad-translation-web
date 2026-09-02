@@ -120,10 +120,12 @@ class Settings(BaseSettings):
     DEEPSEEK_MODEL: str = Field(default="deepseek-chat")
 
     JWT_SECRET_KEY: str = Field(default="change-this-in-production")
-    # Single-tenant safety boundary: admin guard is ON by default so that
-    # sensitive task/project/config/file endpoints are protected even without
-    # an explicit .env opt-in. For trusted internal single-user deployments
-    # the operator may set ENABLE_ADMIN_GUARD=false explicitly.
+    # Single-tenant safety boundary: admin guard is ON by default and
+    # **fail-closed**.  If ENABLE_ADMIN_GUARD=true but ADMIN_API_TOKEN is
+    # empty, every guarded endpoint returns HTTP 503 rather than opening
+    # access.  Operators who need protection MUST set ADMIN_API_TOKEN.
+    # Only set ENABLE_ADMIN_GUARD=false explicitly for a trusted
+    # single-user deployment on an isolated network.
     ENABLE_ADMIN_GUARD: bool = Field(default=True)
     ADMIN_API_TOKEN: str = Field(default="")
 

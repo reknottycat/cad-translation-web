@@ -57,40 +57,73 @@ class CADPipelineService:
     # Unlike the old in-memory `_cancelled_task_ids` set, the file marker is
     # visible across processes (multi-worker Celery / multi-process uvicorn).
 
-    @staticmethod
-    def _cancel_marker_path(task_dir: Path) -> Path:
-        return task_dir / ".cancel"
+    def _cancel_marks_root(self) -> Path:
+        """Stable directory for cross-process cancellation markers.
+
+        This lives *outside* ``cad_tasks/`` so ``delete_task`` /
+        ``clear_all_tasks`` never remove it.  A running worker that finishes
+        after its task directory was deleted can therefore clean up its own
+        marker here without recreating the task dir (which would happen if
+        the marker lived inside the task directory and ``file_lock`` called
+        ``sidecar.parent.mkdir`` on a deleted path).
+        """
+        root = self.settings.get_output_path() / "cad_cancel_marks"
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    def _cancel_marker_path(self, task_id: str) -> Path:
+        """Return the external cancellation marker for ``task_id``."""
+        return self._cancel_marks_root() / f"{task_id}.cancel"
 
     def _is_task_cancelled(self, task_id: str) -> bool:
         """Cross-process cancellation check.
 
         Returns True if:
-        1. A `.cancel` marker file exists in the task dir, OR
+        1. An external `.cancel` marker exists for this task, OR
         2. The task directory or task.json no longer exists (deleted by
            `delete_task` / `clear_all_tasks` while a worker was still running).
 
         Case (2) is critical: after a task is deleted, a running worker must
         treat it as cancelled rather than re-create orphaned files.
         """
-        task_dir = self._task_dir(task_id)
-        marker = self._cancel_marker_path(task_dir)
+        # External cancel marker (never deleted by task cleanup).
+        marker = self._cancel_marker_path(task_id)
         if marker.exists():
             return True
+        # Check whether the task itself still exists.  If the task directory
+        # or task.json was removed, the task is considered cancelled.
+        task_dir = self._tasks_root() / task_id
         meta_path = self._task_meta_path(task_id)
-        # Task dir or task.json gone → task was deleted from under us.
         if not task_dir.exists() or not meta_path.exists():
             return True
         return False
 
     def _mark_task_cancelled(self, task_id: str) -> None:
-        marker = self._cancel_marker_path(self._task_dir(task_id))
-        task_dir = self._task_dir(task_id)
-        task_dir.mkdir(parents=True, exist_ok=True)
+        """Write an external cancellation marker for ``task_id``.
+
+        Never creates the task directory.  Uses the external cancel-marks
+        directory (a sibling of ``cad_tasks/``) so a deleted task dir is not
+        recreated by file_lock's parent.mkdir side effect.
+        """
+        if not task_id:
+            return
+        marker = self._cancel_marker_path(task_id)
+        # file_lock creates the sidecar parent (the cancel_marks root), which
+        # is a stable path never removed by task delete/clear.
         with file_lock(marker):
             marker.touch()
 
     def _clear_task_cancel(self, task_id: str) -> None:
-        marker = self._cancel_marker_path(self._task_dir(task_id))
+        """Remove the external cancellation marker for ``task_id``.
+
+        Never creates the task directory.  If the marker root does not exist
+        or the marker is already gone, this is a no-op.
+        """
+        if not task_id:
+            return
+        marker = self._cancel_marker_path(task_id)
+        if not marker.parent.exists():
+            return
         with file_lock(marker):
             marker.unlink(missing_ok=True)
 
@@ -147,16 +180,31 @@ class CADPipelineService:
         The snapshot has API keys redacted (safe for task.json), but contains
         all non-sensitive parameters (batch_size, provider, model, parallel_count,
         retry_count, glossary settings, etc.) that determine task behaviour.
-        For the LLM service calls themselves, `translate_batch`/`translate_text`
-        internally resolve their own active config at call time; however the
-        task-level parameters that determine chunking and progress reporting
-        come from this snapshot so a mid-flight config change cannot silently
-        alter a task's planned processing profile."""
+        The task-level parameters determine chunking and progress reporting
+        AND the actual translation service config (via ``_get_frozen_llm_config``)
+        so a mid-flight config change cannot silently alter a task's behaviour."""
         snapshot = self._get_task_config_snapshot(task_id)
         llm_runtime = snapshot.get("llm_runtime")
         if isinstance(llm_runtime, dict) and llm_runtime:
             return llm_runtime
         return self._get_translation_runtime()
+
+    def _get_frozen_llm_config(self, task_id: str) -> dict[str, Any] | None:
+        """Return the task's frozen ``llm`` config section from its snapshot.
+
+        The snapshot's ``raw_config_payload`` is the full config file with API
+        keys redacted to ``***``.  The translation service merges live keys at
+        call time, so returning the raw ``llm`` section here is safe.
+        Returns ``None`` when no snapshot exists (caller falls back to live).
+        """
+        snapshot = self._get_task_config_snapshot(task_id)
+        raw_payload = snapshot.get("raw_config_payload")
+        if not isinstance(raw_payload, dict):
+            return None
+        llm_section = raw_payload.get("llm")
+        if not isinstance(llm_section, dict):
+            return None
+        return dict(llm_section)
 
     def _task_excel_path(self, task_id: str, metadata: dict[str, Any] | None = None) -> Path:
         metadata = metadata or self._load_task(task_id)
@@ -207,17 +255,34 @@ class CADPipelineService:
         return self._task_dir(task_id) / "translations_checkpoint.json"
 
     def _append_log(self, task_id: str, message: str) -> None:
+        """Append a line to the task log.
+
+        If the task directory no longer exists (e.g. it was deleted by a
+        concurrent ``delete_task`` / ``clear_all_tasks``), writing is skipped
+        so no orphan files are re-created.
+        """
+        if not task_id:
+            return
         log_path = self._task_log_path(task_id)
+        if not log_path.parent.exists():
+            return
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        log_path.parent.mkdir(parents=True, exist_ok=True)
         with file_lock(log_path):
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(f"[{timestamp}] {message}\n")
                 f.flush()
 
     def _save_checkpoint(self, task_id: str, translations: list[dict[str, str]]) -> None:
+        """Save translation checkpoint to disk.
+
+        If the task directory no longer exists (deleted concurrently), writing
+        is skipped so no orphan checkpoint file is created.
+        """
+        if not task_id:
+            return
         checkpoint_path = self._task_checkpoint_path(task_id)
-        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        if not checkpoint_path.parent.exists():
+            return
         # Cross-process + in-process lock on the checkpoint file's sidecar.
         with file_lock(checkpoint_path):
             atomic_write_json(checkpoint_path, translations)
@@ -447,18 +512,40 @@ class CADPipelineService:
             return json.loads(metadata_path.read_text(encoding="utf-8"))
 
     def _save_task(self, task_id: str, payload: dict[str, Any]) -> None:
+        """Atomically persist task metadata.
+
+        If the task directory no longer exists (deleted concurrently by
+        ``delete_task`` / ``clear_all_tasks``), writing is skipped so no
+        orphan task.json is created in a re-created directory.
+        """
+        if not task_id:
+            return
         metadata_path = self._task_meta_path(task_id)
+        if not metadata_path.parent.exists():
+            return
         # Atomic write prevents readers from seeing a truncated/partial JSON.
         # Cross-process file lock protects against concurrent multi-process writes.
         with file_lock(metadata_path):
             atomic_write_json(metadata_path, payload)
 
     def _update_task(self, task_id: str, **patch: Any) -> dict[str, Any]:
+        """Update task metadata via guarded read-modify-write.
+
+        If the task directory no longer exists (e.g. deleted concurrently by
+        ``delete_task`` / ``clear_all_tasks``), returns the empty dict and
+        does NOT create any files — avoids re-creating orphan task dirs.
+        """
+        if not task_id:
+            return {}
+        metadata_path = self._task_meta_path(task_id)
+        # Guard before acquiring file_lock: if the task dir is gone, do not
+        # let file_lock's sidecar parent.mkdir recreate it.
+        if not metadata_path.parent.exists():
+            return {}
         # Serialize read-modify-write on the task metadata file so concurrent
         # updates (including from other processes) don't clobber each other.
         # file_lock is re-entrant, so _load_task / _save_task nested inside
         # this block won't deadlock within the same thread.
-        metadata_path = self._task_meta_path(task_id)
         with file_lock(metadata_path):
             metadata = self._load_task(task_id)
             metadata.update(patch)
@@ -744,12 +831,22 @@ class CADPipelineService:
                 patch["last_error"] = last_error
             self._update_task(task_id, **patch)
 
-        translated_texts = alibaba_ai_translation_service.translate_batch(
-            texts=original_texts,
-            target_lang=target_language,
-            progress_callback=on_translation_progress,
-            should_cancel=lambda: bool(task_id and self._is_task_cancelled(task_id)),
-        )
+        frozen_llm = self._get_frozen_llm_config(task_id)
+        if frozen_llm:
+            with alibaba_ai_translation_service.frozen_config(frozen_llm):
+                translated_texts = alibaba_ai_translation_service.translate_batch(
+                    texts=original_texts,
+                    target_lang=target_language,
+                    progress_callback=on_translation_progress,
+                    should_cancel=lambda: bool(task_id and self._is_task_cancelled(task_id)),
+                )
+        else:
+            translated_texts = alibaba_ai_translation_service.translate_batch(
+                texts=original_texts,
+                target_lang=target_language,
+                progress_callback=on_translation_progress,
+                should_cancel=lambda: bool(task_id and self._is_task_cancelled(task_id)),
+            )
         ensure_not_cancelled()
         translations: list[dict[str, str]] = []
         failed_count = 0
@@ -1384,12 +1481,14 @@ class CADPipelineService:
         """Clear all tasks by removing the root tasks directory.
 
         Cross-process safe: we first mark every processing/queued task as
-        cancelled by writing `.cancel` markers, then remove the task tree.
-        The markers signal any worker currently executing a task in this tree
+        cancelled by writing external `.cancel` markers (in the stable
+        ``cad_cancel_marks/`` directory), then remove the task tree.  The
+        markers signal any worker currently executing a task in this tree
         to stop before we delete files, preventing a "deleted-under-the-writer"
         race where a running worker writes task.json after we removed it.
         """
         tasks_root = self._tasks_root()
+        cancel_root = self._cancel_marks_root()
         # Phase 1: mark all processing/queued tasks as cancelled.
         if tasks_root.exists():
             for metadata_path in tasks_root.glob("*/task.json"):
@@ -1403,6 +1502,14 @@ class CADPipelineService:
             self._delete_tree(tasks_root)
         # Recreate the root directory to ensure it exists for future tasks
         tasks_root.mkdir(parents=True, exist_ok=True)
+        # Phase 3: clean up all external cancellation markers now that the
+        # task tree is gone and any worker has already observed the deletion.
+        if cancel_root.exists():
+            for marker in cancel_root.glob("*.cancel"):
+                try:
+                    marker.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def delete_task(self, task_id: str) -> None:
         task_dir = self._task_dir(task_id)
@@ -1418,6 +1525,10 @@ class CADPipelineService:
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             pass  # Task may already be gone; still attempt deletion.
         self._delete_tree(task_dir)
+        # Clean up the external cancellation marker after the directory is
+        # gone.  Any worker that was mid-flight has already observed the
+        # directory deletion and treats the task as cancelled.
+        self._clear_task_cancel(task_id)
 
     def stop_all_tasks(self) -> dict[str, Any]:
         cancelled_task_ids: list[str] = []

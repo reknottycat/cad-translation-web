@@ -35,11 +35,11 @@ python run_celery.py
 
 ## Admin access token
 
-`ENABLE_ADMIN_GUARD` is **on by default** in this codebase. All task / project / file / config / translation endpoints are protected when `ADMIN_API_TOKEN` is set in `backend/.env`.
+`ENABLE_ADMIN_GUARD` is **on by default and fail-closed** in this codebase. All task / project / file / config / translation endpoints are protected when `ADMIN_API_TOKEN` is set in `backend/.env`.
 
 - `ENABLE_ADMIN_GUARD=true` + `ADMIN_API_TOKEN=<token>` — callers must send `X-Admin-Token: <token>` or `Authorization: Bearer <token>` on every sensitive request.
-- `ENABLE_ADMIN_GUARD=true` + empty `ADMIN_API_TOKEN` — open access on trusted network (no token to verify against).
-- `ENABLE_ADMIN_GUARD=false` — explicitly disables token checks even when a token is configured (not recommended).
+- `ENABLE_ADMIN_GUARD=true` + empty `ADMIN_API_TOKEN` — every guarded endpoint returns `503 Service Unavailable`. No silent open-access path exists.
+- `ENABLE_ADMIN_GUARD=false` — explicitly disables token checks even when a token is configured (trusted-network only, not recommended).
 
 `JWT_SECRET_KEY` is not used as an admin token fallback.
 

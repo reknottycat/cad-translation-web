@@ -137,7 +137,7 @@ powershell -ExecutionPolicy Bypass -File scripts/build_scale_exe_nuitka.ps1
 
 ## Security Notes
 
-1. Admin guard is **on by default** (`ENABLE_ADMIN_GUARD=true`). Set `ADMIN_API_TOKEN` in `backend/.env` to enable token-based protection for all task/project/file/config/translation endpoints. If no token is configured, the instance runs in trusted-network single-tenant mode (open access), which is safe only on an isolated internal network.
+1. Admin guard is **on by default and fail-closed**. When `ENABLE_ADMIN_GUARD=true`, sensitive task/project/file/config/translation endpoints require `ADMIN_API_TOKEN` (via `X-Admin-Token` or `Authorization: Bearer`). If the token is **not** configured while the guard is enabled, all guarded routes return `503 Service Unavailable` rather than silently opening access. Only set `ENABLE_ADMIN_GUARD=false` explicitly to run in trusted-network open mode.
 2. Packaging scripts sanitize API keys from runtime configuration, but development `.env` files must still be kept private.
 3. Backend file handling uses `resolve_within_directory` and `get_safe_filename` to prevent path traversal.
 4. Local development uses HTTP. For public deployment, terminate TLS at a reverse proxy.
@@ -176,9 +176,9 @@ The system is designed to support multiple users processing CAD tasks concurrent
 
 **Single-tenant model**: This system is a single-tenant web application for internal deployment. It has **no per-user accounts** and does **not** attempt to provide per-user data isolation between different individuals on the same instance. All projects/tasks/files on one instance belong to the same logical tenant.
 
-- **`ENABLE_ADMIN_GUARD` is ON by default.** Set `ADMIN_API_TOKEN` in `backend/.env` to require a token for every sensitive task/project/file/config/translation endpoint. Callers authenticate with `X-Admin-Token: <token>` or `Authorization: Bearer <token>`.
-- If `ENABLE_ADMIN_GUARD=true` but `ADMIN_API_TOKEN` is left empty, the system operates as a trusted-network deployment (no token checks) — suitable only on an isolated private network where all clients are trusted.
-- Explicitly set `ENABLE_ADMIN_GUARD=false` to skip all token checks even when a token is configured (not recommended).
+- **`ENABLE_ADMIN_GUARD` is ON by default and fail-closed.** Set `ADMIN_API_TOKEN` in `backend/.env` to require a token for every sensitive task/project/file/config/translation endpoint. Callers authenticate with `X-Admin-Token: <token>` or `Authorization: Bearer <token>`.
+- **Fail-closed behavior**: If `ENABLE_ADMIN_GUARD=true` but `ADMIN_API_TOKEN` is left empty, every guarded endpoint returns `503 Service Unavailable`. This prevents accidental open access when protection is intended but not properly configured. There is **no silent fail-open path**.
+- Only explicitly set `ENABLE_ADMIN_GUARD=false` to run all endpoints open (trusted-network single-user deployment). This is not recommended for shared environments.
 - A `task_id` / `project_id` / `file_id` alone is **not** an access credential — it only identifies a resource once the caller has passed the admin guard.
 - Cross-tenant isolation would require adding a user authentication system (login, session/JWT, per-user ownership columns on projects/tasks/files, per-user data-scoped queries), which is **out of scope** for this codebase. To serve multiple independent tenants from one host, deploy one instance per tenant or place a reverse proxy / SSO in front of separate deployments.
 
@@ -186,7 +186,7 @@ The system is designed to support multiple users processing CAD tasks concurrent
 
 The LLM/CAD runtime configuration (stored in `~/.config/cli-anything-cad/config.json`) is deliberately designed as **server-global configuration** shared by all users and tasks.
 
-- Each task **captures a sanitized config snapshot** in its `task.json` at creation/resume time. Task-level parameters (batch_size, provider/model, parallel_count, retry_count, glossary) are read from this snapshot so an admin changing the global config mid-flight does **not** silently alter the processing profile of already-running tasks.
+- Each task **captures a sanitized config snapshot** in its `task.json` at creation/resume time. The **actual LLM translation calls** (`translate_batch` / `translate_text` / `_chat`) use the snapshot's frozen `llm` config section through a thread-local context manager, so an admin changing the global config mid-flight cannot alter a running task's provider/model/parameters. Live API keys are still resolved at call time from env/config (the snapshot has them redacted for safety).
 - Concurrent updates to the runtime config are protected by the same file-lock mechanism, so writes are serialized and JSON is never corrupted.
 - Config writes are guarded by `require_admin_access` (admin token). Non-admin users cannot change the global config.
 - To serve per-user or per-project configuration, extend the workflow engine to snapshot the effective config into each task's context at start.
@@ -194,7 +194,7 @@ The LLM/CAD runtime configuration (stored in `~/.config/cli-anything-cad/config.
 ### Known limitations in multi-process mode
 
 - Cross-process file locks protect task metadata and config writes.
-- **Cross-process cancellation is file-based**: stop/cancel operations write a `.cancel` marker in each task directory. Any worker process running that task checks the marker before/after each chunk and aborts cleanly. The marker is removed when the task reaches a terminal state (done/error/cancelled).
-- **Config snapshot per task**: each task stores a sanitized snapshot of the effective LLM/CAD runtime config in `task.json` at creation time. Task-level parameters (batch size, provider/model, parallel count, retry count, glossary) that determine processing are read from this snapshot, so a mid-flight global config change cannot silently alter a task's planned profile. (Actual LLM API calls may still resolve live keys for authentication; this is intended.)
+- **Cross-process cancellation is file-based**: stop/cancel operations write a `.cancel` marker in a **stable external directory** (`outputs/cad_cancel_marks/`), never inside the task directory. Any worker process running a task checks the marker before/after each chunk and aborts cleanly. The marker is removed when the task reaches a terminal state. Because markers live outside task directories, `delete_task` / `clear_all_tasks` never race with a running worker's cleanup path to recreate the task directory.
+- **Config snapshot per task**: each task stores a sanitized snapshot of the effective LLM/CAD runtime config in `task.json` at creation time. The actual LLM translation calls use the frozen `llm` section from this snapshot via a thread-local context manager (`LLMTranslationService.frozen_config`), so a mid-flight global config change cannot alter a task's actual provider/model/batch_size/parameters. API keys are resolved live at call time (not stored in the snapshot).
 - LLM rate-limit buckets are per-process. Under multi-worker Celery, RPM/TPM quotas may be exceeded by the aggregate of all workers.
 - `CADPipelineService` module exceeds the 800-line guideline; splitting into submodules is tracked as a follow-up task.
