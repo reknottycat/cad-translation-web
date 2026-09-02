@@ -94,10 +94,12 @@ if not exist "logs" mkdir "logs"
 where python >nul 2>nul
 if %errorlevel%==0 (
     set "PYTHON=python"
+    set "PYTHON_ARGS="
 ) else (
     where py >nul 2>nul
     if %errorlevel%==0 (
-        set "PYTHON=py -3"
+        set "PYTHON=py"
+        set "PYTHON_ARGS=-3"
     ) else (
         echo Python was not found. Please install Python 3.10+ and try again.
         pause
@@ -137,7 +139,7 @@ set "PORT=8000"
 set "DEBUG=false"
 
 start "" cmd /c "timeout /t 3 /nobreak >nul && start \"\" \"%APP_URL%\""
-%PYTHON% "%BACKEND_ENTRY%"
+%PYTHON% %PYTHON_ARGS% "%BACKEND_ENTRY%"
 
 endlocal
 '@ | Set-Content -Encoding ascii -LiteralPath $DestinationPath
