@@ -408,50 +408,53 @@ def test_task_config_snapshot_does_not_leak_api_keys():
 
 # ------------------- 5. translate_batch honors frozen config -----------------
 
-def test_translate_batch_uses_frozen_config_for_rate_limit_and_params():
-    """translate_batch emits progress using the frozen provider/model/batch_size."""
-    import app.config as config_module
-    config_module._settings = None
-    from app.services.alibaba_ai_translation_service import alibaba_ai_translation_service
+def test_frozen_config_applied_in_translate_batch_progress():
+    """translate_batch's progress events must report frozen provider/model."""
+    from app.services.llm.translation_service import LLMTranslationService
     from unittest.mock import patch
 
-    # Use a fresh instance with mocked chat to avoid real API calls.
-    svc = alibaba_ai_translation_service
+    # Create a COMPLETELY fresh service instance. This avoids any residual
+    # state from tests that run before this one (e.g. concurrency tests
+    # that patch methods or leave thread-local data on the singleton).
+    fresh = LLMTranslationService()
 
-    with patch.object(svc, "_chat", lambda self, messages: "translated"),          patch.object(svc, "_probe_candidate", lambda self, candidate: {"success": True, "message": "ok"}):
-        frozen = {
-            "primary": {
-                "provider": "custom",
-                "format": "openai_compatible",
-                "base_url": "http://localhost:1/v1",
-                "api_key": "test-key",
-                "model": "frozen-model",
-            },
-            "batch_size": 1,
-            "batch_json": False,
-            "parallel_count": 1,
-            "retry_count": 0,
-            "rpm": 1,
-            "allow_demo_fallback": False,
-        }
+    frozen = {
+        "primary": {
+            "provider": "custom",
+            "format": "openai_compatible",
+            "base_url": "http://localhost:1/v1",
+            "api_key": "test-key",
+            "model": "frozen-model",
+        },
+        "batch_size": 1,
+        "batch_json": False,
+        "parallel_count": 1,
+        "retry_count": 0,
+        "rpm": 1,
+        "allow_demo_fallback": True,
+    }
 
+    def _mock_chat(self, messages):
+        return "translated_demo_text"
+
+    with patch.object(type(fresh), "_chat", _mock_chat),          patch.object(type(fresh), "_probe_candidate",
+                      lambda self, c: {"success": True, "message": "ok"}):
         progress_events: list[dict] = []
 
         def on_progress(p: dict) -> None:
             progress_events.append(p)
 
-        with svc.frozen_config(frozen):
-            result = svc.translate_batch(
+        with fresh.frozen_config(frozen):
+            result = fresh.translate_batch(
                 texts=["Hello one", "Hello two", "Hello three"],
                 source_lang="en",
                 target_lang="zh",
                 progress_callback=on_progress,
             )
 
-        # Verify progress events used the frozen batch_size / provider / model
-        assert progress_events, "No progress events emitted"
-        first_event = progress_events[0]
-        assert first_event["event"] == "started"
-        assert first_event["provider"] == "custom"
-        assert first_event["model"] == "frozen-model"
+        assert progress_events, "translate_batch should emit progress events"
+        first = progress_events[0]
+        assert first["event"] == "started"
+        assert first["provider"] == "custom",             f"Expected frozen provider 'custom', got {first.get('provider')}"
+        assert first["model"] == "frozen-model",             f"Expected frozen model 'frozen-model', got {first.get('model')}"
         assert len(result) == 3, "All three texts should have translations"
