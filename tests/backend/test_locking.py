@@ -228,3 +228,109 @@ def test_file_lock_create_parents_false_does_not_mkdir(temp_dir):
     assert not nested3.parent.exists(), (
         "atomic_write_json(create_parents=False) must NOT create the parent"
     )
+
+
+# ---------------------------------------------------------------------------
+# Windows atomic-replace regression (Issue #14 / gstack release gate).
+#
+# On Windows ``os.replace`` can transiently fail with ``PermissionError``
+# (WinError 5) when a concurrent reader still holds the destination open
+# without FILE_SHARE_DELETE.  POSIX allows renaming an open inode, so this is
+# Windows-only.  ``atomic_write_json``/``atomic_write_text`` retry such
+# transient sharing violations via ``_atomic_replace`` while keeping the write
+# fully atomic.  We reproduce the retry path on any OS by monkeypatching
+# ``os.replace`` to raise once (transient) and forcing the Windows-only
+# decision via ``_is_windows_sharing_violation``.
+# ---------------------------------------------------------------------------
+
+
+def test_atomic_replace_retries_windows_sharing_violation(tmp_path, monkeypatch):
+    """A transient Windows PermissionError on os.replace is retried and the
+    destination is atomically replaced (regression for WinError 5)."""
+    from app.utils import locking
+
+    original_replace = locking.os.replace
+    calls = {"n": 0}
+
+    def flaky_replace(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise PermissionError(5, "Access is denied")
+        return original_replace(src, dst)
+
+    monkeypatch.setattr(locking.os, "replace", flaky_replace)
+    monkeypatch.setattr(locking, "_is_windows_sharing_violation", lambda exc: True)
+
+    src = tmp_path / "src.dat"
+    dst = tmp_path / "dst.dat"
+    src.write_bytes(b"payload")
+
+    locking._atomic_replace(src, dst, retries=5, base_delay=0.0)
+
+    assert dst.read_bytes() == b"payload"
+    assert calls["n"] == 2, "expected exactly one transient failure then success"
+
+
+def test_atomic_write_json_survives_windows_share_conflict(tmp_path, monkeypatch):
+    """atomic_write_json succeeds even when os.replace hits a transient
+    Windows sharing violation on the destination."""
+    import json as _json
+    from app.utils import locking
+
+    original_replace = locking.os.replace
+    dst = tmp_path / "config.json"
+    dst.write_text("{}", encoding="utf-8")
+    calls = {"n": 0}
+
+    def flaky_replace(src, target):
+        calls["n"] += 1
+        if calls["n"] == 1 and Path(target) == dst:
+            raise PermissionError(5, "Access is denied")
+        return original_replace(src, target)
+
+    monkeypatch.setattr(locking.os, "replace", flaky_replace)
+    monkeypatch.setattr(locking, "_is_windows_sharing_violation", lambda exc: True)
+
+    locking.atomic_write_json(dst, {"k": "v"})
+
+    assert _json.loads(dst.read_text(encoding="utf-8")) == {"k": "v"}
+    assert calls["n"] == 2
+
+
+def test_atomic_replace_raises_after_exhausting_retries(tmp_path, monkeypatch):
+    """A persistent Windows PermissionError is NOT silently swallowed: after the
+    retry budget is exhausted the original error propagates and the destination
+    is left untouched."""
+    from app.utils import locking
+
+    def persistent_replace(src, dst):
+        raise PermissionError(5, "Access is denied")
+
+    monkeypatch.setattr(locking.os, "replace", persistent_replace)
+    monkeypatch.setattr(locking, "_is_windows_sharing_violation", lambda exc: True)
+
+    src = tmp_path / "s.dat"
+    dst = tmp_path / "d.dat"
+    src.write_bytes(b"x")
+    with pytest.raises(PermissionError):
+        locking._atomic_replace(src, dst, retries=2, base_delay=0.0)
+    assert not dst.exists(), "destination must remain untouched on persistent failure"
+
+
+def test_atomic_replace_non_share_violation_not_retried(tmp_path, monkeypatch):
+    """When the raised error is NOT classified as a Windows share violation
+    (e.g. a genuine non-PermissionError OSError), _atomic_replace re-raises it
+    immediately instead of retrying -- so real errors are never masked."""
+    from app.utils import locking
+
+    def rejecting_replace(src, dst):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(locking.os, "replace", rejecting_replace)
+    # Force the Windows branch so only the error-type filter is exercised.
+    monkeypatch.setattr(locking, "_is_windows_sharing_violation", lambda exc: False)
+
+    src = tmp_path / "s.dat"
+    src.write_bytes(b"x")
+    with pytest.raises(OSError):
+        locking._atomic_replace(src, tmp_path / "d.dat", retries=5, base_delay=0.0)

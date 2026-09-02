@@ -27,6 +27,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -166,6 +167,45 @@ def _release_os_lock(lock_file) -> None:
             pass
 
 
+def _is_windows_sharing_violation(exc: OSError) -> bool:
+    """True when ``exc`` is a Windows transient file-share violation.
+
+    On Windows ``os.replace`` (MoveFileExW) fails with ``PermissionError`` /
+    ``WinError 5`` (ERROR_ACCESS_DENIED) when the destination still has any
+    other open handle without ``FILE_SHARE_DELETE``.  POSIX happily renames an
+    open inode, so this race is Windows-only and is *transient*: the reader is
+    about to close its handle, so a short retry succeeds.  We deliberately
+    treat *only* Windows ``PermissionError`` as retryable so behaviour on POSIX
+    is unchanged and genuine errors (bad path, cross-volume rename, real
+    permission denial) are never masked.
+    """
+    return os.name == "nt" and isinstance(exc, PermissionError)
+
+
+def _atomic_replace(src: Path, dst: Path, retries: int = 50, base_delay: float = 0.01) -> None:
+    """Atomically move ``src`` onto ``dst``, retrying transient Windows share
+    violations.
+
+    The write is fully atomic (temp file written + fsynced in the caller), so a
+    failed rename leaves ``dst`` untouched and valid.  Retrying on a transient
+    Windows sharing violation is therefore always safe: the destination is only
+    ever replaced once, whole, and never left partially written.  This keeps
+    cross-thread / cross-process consistency identical to the POSIX behaviour
+    while removing the spurious ``PermissionError [WinError 5]`` that occurs
+    when a concurrent reader briefly holds ``dst`` open on Windows.
+    """
+    attempt = 0
+    while True:
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError as exc:
+            if not _is_windows_sharing_violation(exc) or attempt >= retries:
+                raise
+            attempt += 1
+            time.sleep(base_delay * attempt)
+
+
 def atomic_write_json(path: Path, payload: Any, create_parents: bool = True) -> None:
     """Write ``payload`` as JSON to ``path`` atomically (temp + rename).
 
@@ -191,7 +231,10 @@ def atomic_write_json(path: Path, payload: Any, create_parents: bool = True) -> 
             tmp_file.flush()
             os.fsync(tmp_file.fileno())
         # os.replace is atomic on POSIX and Windows (same filesystem).
-        os.replace(tmp_path, path)
+        # On Windows, retry transient sharing violations (a concurrent reader
+        # briefly holds the destination open) so the atomic write never spuriously
+        # fails with PermissionError [WinError 5].
+        _atomic_replace(tmp_path, path)
     except Exception:
         try:
             tmp_path.unlink(missing_ok=True)
@@ -223,7 +266,7 @@ def atomic_write_text(path: Path, content: str, create_parents: bool = True) -> 
             tmp_file.write(content)
             tmp_file.flush()
             os.fsync(tmp_file.fileno())
-        os.replace(tmp_path, path)
+        _atomic_replace(tmp_path, path)
     except Exception:
         try:
             tmp_path.unlink(missing_ok=True)

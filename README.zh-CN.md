@@ -222,7 +222,7 @@ powershell -ExecutionPolicy Bypass -File scripts/build_scale_exe_nuitka.ps1
 系统支持内网部署下多操作者并发处理 CAD 任务，行为要点：
 
 - **任务隔离**：每个 CAD 任务有独立 UUID 任务目录（`outputs/cad_tasks/{task_id}/`），源文件、Excel、译文 CAD 与日志互不混用。
-- **跨进程文件锁**：任务元数据、翻译 checkpoint 与运行时配置通过原子写 + 稳定 `.lock` 侧车文件的跨进程文件锁保护，POSIX 用 `fcntl.flock`，Windows 用 `msvcrt.locking`。
+- **跨进程文件锁**：任务元数据、翻译 checkpoint 与运行时配置通过原子写 + 稳定 `.lock` 侧车文件的跨进程文件锁保护，POSIX 用 `fcntl.flock`，Windows 用 `msvcrt.locking`。Windows 上原子改名 （`os.replace`）可能在并发读方短暂占用目标文件时抛出 `PermissionError [WinError 5]`；写入端会对这种瞬时共享冲突做有上限的退避重试，保证原子写不会偶发失败。
 - **集中式 `task_id` 校验**：凡接受 `task_id` 的任务端点与服务方法，都会在其拼接进任意文件系统路径前校验其是否符合系统生成的形态（8 位小写十六进制，`uuid4().hex[:8]`）。含 `../`、`.`、路径分隔符或任何非十六进制文本的取值会被以 `400` 拒绝，调用方无法读取/下载/删除/回填任务树之外的路径。
 
 **单租户模型**：本系统是面向内部部署的**单租户** Web 应用，**没有 per-user 账户体系**，不提供同一实例上不同用户间的数据隔离；一台实例上的所有项目/任务/文件同属同一逻辑租户。

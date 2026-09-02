@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -159,13 +160,22 @@ def _assert_pep621_project_present():
     assert "scripts" in project
 
 
-def test_isolated_build_generates_wheel_and_sdist_reads_version():
-    """Real isolated ``python -m build --wheel --sdist`` inside agent-harness
-    must succeed and produce artifacts whose version reads from
-    backend/app/version.py (single SemVer source).  Mirrors exactly what the
-    Windows Python 3.12 venv runs to build the deliverable CLI (PR #19
-    blocker #3)."""
-    import shutil
+def test_isolated_build_generates_wheel_and_sdist_reads_version(tmp_path):
+    """Real isolated ``python -m build --wheel --sdist`` must succeed and
+    produce artifacts whose version reads from backend/app/version.py (single
+    SemVer source).
+
+    Windows/OneDrive regression (gstack release gate / Issue #14): the old
+    version cleaned the **repository** ``agent-harness/dist`` and
+    ``agent-harness/build`` with ``shutil.rmtree``.  On a OneDrive / cloud
+    ``agent-harness`` (a reparse-point directory) that delete raised
+    ``PermissionError``.  This version stages a throwaway **per-run copy of
+    agent-harness under TEMP** (together with the ``backend/app/version.py`` it
+    needs as a sibling), runs the real isolated build there and verifies the
+    produced wheel/sdist versions -- without ever creating or deleting build
+    artifacts inside the repository.  ``tmp_path`` is removed automatically by
+    pytest, so no manual rmtree of repo dirs is needed.
+    """
     import subprocess
     import sys
     import tarfile
@@ -179,19 +189,44 @@ def test_isolated_build_generates_wheel_and_sdist_reads_version():
     except ImportError:
         pytest.skip("`build` is not installed; cannot run isolated build")
 
+    # Record the repository's PRE-EXISTING state of the classic build-output dirs
+    # (dist/, build/).  In some real workspaces these already exist -- e.g. an
+    # empty Microsoft OneDrive "cloud" / reparse-point directory named
+    # ``agent-harness/dist`` checked into the tree.  We must NOT delete them and
+    # must NOT assert their absence; we only guard that THIS test does not create
+    # or write them inside the repository (everything is built under tmp_path).
+    repo_dist_preexisting = (AGENT_HARNESS / "dist").exists()
+    repo_build_preexisting = (AGENT_HARNESS / "build").exists()
+
     canonical = re.search(
         r'__version__\s*=\s*"([^"]+)"',
         (REPO / "backend" / "app" / "version.py").read_text(encoding="utf-8"),
     ).group(1)
 
-    out = AGENT_HARNESS / "dist"
-    for d in (out, AGENT_HARNESS / "build"):
-        if d.exists():
-            shutil.rmtree(d)
+    # Stage agent-harness into a per-run TEMP tree that keeps it a sibling of
+    # backend/app/version.py (setup.py resolves ``../backend/app/version.py``).
+    stage = tmp_path / "stage"
+    stage_harness = stage / "agent-harness"
+    shutil.copytree(
+        AGENT_HARNESS,
+        stage_harness,
+        ignore=shutil.ignore_patterns(
+            "*.pyc", "__pycache__", ".pytest_cache", "*.egg-info",
+            "build", "dist", ".git",
+        ),
+    )
+    # Provide the canonical version.py at the sibling-relative location.
+    stage_version = stage / "backend" / "app" / "version.py"
+    stage_version.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(
+        REPO / "backend" / "app" / "version.py",
+        stage_version,
+    )
 
+    # Run the real isolated build entirely inside the temp staging tree.
     proc = subprocess.run(
         [sys.executable, "-m", "build", "--wheel", "--sdist"],
-        cwd=str(AGENT_HARNESS),
+        cwd=str(stage_harness),
         capture_output=True,
         text=True,
     )
@@ -199,6 +234,7 @@ def test_isolated_build_generates_wheel_and_sdist_reads_version():
         f"isolated build failed\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
     )
 
+    out = stage_harness / "dist"
     wheels = list(out.glob("*.whl"))
     sdists = list(out.glob("*.tar.gz"))
     assert wheels, f"wheel was not produced\n{proc.stdout}"
@@ -217,11 +253,19 @@ def test_isolated_build_generates_wheel_and_sdist_reads_version():
         pkg_info = tf.extractfile(f"cad_translate-{canonical}/PKG-INFO").read().decode("utf-8")
     assert f"Version: {canonical}" in pkg_info, "sdist metadata version mismatch"
 
-    # cleanup generated artifacts so the repo stays clean.
-    for d in (out, AGENT_HARNESS / "build"):
-        if d.exists():
-            shutil.rmtree(d)
-
+    # Everything (dist/, build/, *.egg-info) lives under the temp staging tree,
+    # which pytest cleans up automatically.  Guard only that THIS run did not
+    # newly create/write the classic build-output dirs in the repository: if a
+    # dir already existed before the test (OneDrive reparse placeholder etc.)
+    # we leave it untouched and never assert its absence or delete it.
+    if not repo_dist_preexisting:
+        assert not (AGENT_HARNESS / "dist").exists(), (
+            "repo agent-harness/dist must not be created by this test"
+        )
+    if not repo_build_preexisting:
+        assert not (AGENT_HARNESS / "build").exists(), (
+            "repo agent-harness/build must not be created by this test"
+        )
 
 # Each release launcher .bat is produced by exactly one writer function.
 _LAUNCHER_WRITERS = {
