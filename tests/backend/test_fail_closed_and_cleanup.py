@@ -780,16 +780,24 @@ def test_mp_exists_check_delete_race_leaves_no_orphans():
     # The task dir must NOT be recreated regardless of race outcome.
     task_dir = svc._task_dir(task_id)
     assert not task_dir.exists(), f"Task dir was recreated: {task_dir}"
-    # No orphan files matching the task_id in the tasks root or lifecycle dir.
+    # No orphan task files / task subdirectories matching the task_id in the
+    # tasks root.  Only the (empty, identity-stable) lifecycle lock marker is
+    # intentionally retained.
     tasks_root = task_dir.parent
     if tasks_root.exists():
         for p in tasks_root.glob(f"{task_id}*"):
-            assert False, f"Found orphan artifact: {p}"
-    # No orphan lifecycle files.
+            assert False, f"Found orphan task artifact: {p}"
+    # The per-task lifecycle lock marker is intentionally RETAINED so exactly
+    # one lock object exists for this task_id (lock identity stays stable and
+    # is never split by an unguarded unlink).  It is an empty coordination
+    # file in the sibling cad_task_lifecycle/ dir — not a task artifact.
     life_root = svc._lifecycle_root()
-    if life_root.exists():
-        for p in life_root.glob(f"{task_id}*"):
-            assert False, f"Found orphan lifecycle artifact: {p}"
+    assert life_root.exists(), "Lifecycle root should always exist"
+    retained = list(life_root.glob(f"{task_id}.lifecycle*"))
+    assert retained, (
+        f"Expected the per-task lifecycle lock marker to be retained for "
+        f"{task_id}, got {retained}"
+    )
     # External cancel marker should be gone.
     marker = svc._cancel_marker_path(task_id)
     assert not marker.exists(), f"External cancel marker should be cleaned: {marker}"

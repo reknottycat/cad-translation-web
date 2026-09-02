@@ -84,22 +84,25 @@ class CADPipelineService:
             yield
 
     def _cleanup_lifecycle_lock(self, task_id: str) -> None:
-        """Remove the per-task lifecycle lock file + sidecar after a delete.
+        """Intentionally NO-OP: per-task lifecycle lock files are retained.
 
-        Called after ``delete_task`` / ``clear_all_tasks`` has released the
-        lifecycle lock and the task dir is gone.  Safe to call even if a
-        concurrent worker briefly grabs the lock afterwards: the worker will
-        find ``task_dir.exists() == False`` and skip — it never creates a
-        new lifecycle lock file because ``_task_lifecycle_lock`` uses
-        ``file_lock`` which creates the sidecar in the stable lifecycle root.
+        Deleting ``<task>.lifecycle`` / ``<task>.lifecycle.lock`` while another
+        process may still hold or be waiting on them would destroy the lock's
+        inode and let a later acquirer create a fresh lock object at the same
+        path — splitting lock identity so two processes believe they hold the
+        same "task lock" while actually guarding different inodes.  Keeping the
+        stable lifecycle lock files guarantees exactly one lock object exists
+        per task_id for its lifetime, which is what makes per-task lifecycle
+        coordination safe against cross-process clear/delete races.
+
+        The lifecycle files are empty coordination markers in the stable
+        ``cad_task_lifecycle/`` sibling directory; they are never removed by
+        task deletion or ``clear_all_tasks`` and impose negligible overhead.
         """
-        lock_path = self._lifecycle_lock_path(task_id)
-        lock_sidecar = Path(str(lock_path) + ".lock")
-        try:
-            lock_path.unlink(missing_ok=True)
-            lock_sidecar.unlink(missing_ok=True)
-        except OSError:
-            pass
+        # Deliberately do nothing: lifecycle lock files are retained so lock
+        # identity stays stable.  Task directories and external cancel markers
+        # are the only things removed by delete/clear.
+        return
 
     # --- Cross-process cancellation markers (file-based) ---
     # Each task directory may contain a `.cancel` marker file. Any worker
@@ -1579,24 +1582,32 @@ class CADPipelineService:
         return tasks
 
     def clear_all_tasks(self) -> None:
-        """Clear all tasks by removing the root tasks directory.
+        """Clear all tasks by removing every task directory.
 
-        Cross-process safe: we first mark every processing/queued task as
-        cancelled by writing external `.cancel` markers (in the stable
-        ``cad_cancel_marks/`` directory), then remove the task tree.  The
-        markers signal any worker currently executing a task in this tree
-        to stop before we delete files, preventing a "deleted-under-the-writer"
-        race where a running worker writes task.json after we removed it.
+        Cross-process safe: we first mark each discovered task as cancelled by
+        writing external ``.cancel`` markers (in the stable
+        ``cad_cancel_marks/`` directory), then remove each task directory
+        *while holding that task's per-task lifecycle lock*.  Writers
+        (``_save_task`` / ``_update_task`` / ``_append_log`` /
+        ``_save_checkpoint``) hold the same per-task lifecycle lock for their
+        entire exists→lock→write sequence, so no writer can be mid-operation
+        when its directory is removed — closing the previous TOCTOU where the
+        lock was acquired momentarily (``with ...: pass``) and released before
+        the whole tree was removed, letting a writer slip back in between.
 
-        Per-task lifecycle locks (in the stable ``cad_task_lifecycle/``
-        directory outside ``cad_tasks/``) are acquired for each discovered
-        task before its directory is removed, so no writer holding the same
-        task lifecycle lock can be mid-write when the delete happens.
+        The per-task lifecycle lock files live in the stable sibling directory
+        ``cad_task_lifecycle/`` (outside ``cad_tasks/``) and are intentionally
+        **retained** after deletion so that exactly one lock object exists per
+        task_id for its lifetime.  Unlinking them under another process's feet
+        would split lock identity (two different lock objects protecting the
+        same task), which is why no ``*.lifecycle`` / ``*.lifecycle.lock`` file
+        is ever deleted here.
         """
         tasks_root = self._tasks_root()
         cancel_root = self._cancel_marks_root()
-        lifecycle_root = self._lifecycle_root()
-        # Phase 1: mark all processing/queued tasks as cancelled.
+
+        # Phase 1: mark all currently-discoverable tasks as cancelled so any
+        # running worker stops writing before we delete.
         if tasks_root.exists():
             for metadata_path in tasks_root.glob("*/task.json"):
                 task_id = metadata_path.parent.name
@@ -1604,35 +1615,49 @@ class CADPipelineService:
                     self._mark_task_cancelled(task_id)
                 except OSError:
                     pass  # Already deleted or locked by another process.
-        # Phase 1b: acquire each task's lifecycle lock so a writer in another
-        # process cannot be mid-sequence (exists→lock→write) when we delete.
-        for metadata_path in list(tasks_root.glob("*/task.json")):
-            task_id = metadata_path.parent.name
-            try:
-                with self._task_lifecycle_lock(task_id):
-                    pass  # Lock held momentarily; the delete below follows.
-            except (OSError, FileNotFoundError):
-                pass  # Task already gone or lifecycle dir cleaned.
-        # Phase 2: remove the root tasks directory.
+
+        # Phase 2: remove each task directory *while holding* its per-task
+        # lifecycle lock.  Enumerate by directory name (not just `*/task.json`)
+        # so partial / mid-creation task directories are also reclaimed under
+        # their lock.  A writer in another process that holds (or is waiting
+        # for) the same lifecycle lock is thereby serialized with the delete —
+        # it either finishes writing before we delete, or acquires the lock
+        # after the directory is already gone and skips (task_dir.exists()==False).
         if tasks_root.exists():
-            self._delete_tree(tasks_root)
-        # Recreate the root directory to ensure it exists for future tasks
+            task_ids = sorted(
+                child.name for child in tasks_root.iterdir() if child.is_dir()
+            )
+            for task_id in task_ids:
+                task_dir = self._tasks_root() / task_id
+                try:
+                    with self._task_lifecycle_lock(task_id):
+                        # Re-mark under the lock (covers partial tasks) so a
+                        # mid-flight worker still sees cancellation even if it
+                        # only grabs the lock after we release it.
+                        try:
+                            self._mark_task_cancelled(task_id)
+                        except OSError:
+                            pass
+                        if task_dir.exists():
+                            self._delete_tree(task_dir)
+                except (OSError, FileNotFoundError):
+                    pass  # Task already gone or lifecycle dir unavailable.
+
+        # Remove any leftover stray non-directory files (e.g. interrupted
+        # atomic-write temp files) in the root; task directories were already
+        # removed above under their lifecycle locks.
+        if tasks_root.exists():
+            for child in list(tasks_root.iterdir()):
+                try:
+                    if not child.is_dir():
+                        child.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        # Recreate the root directory to ensure it exists for future tasks.
         tasks_root.mkdir(parents=True, exist_ok=True)
-        # Phase 2b: clean up all per-task lifecycle locks now that the task
-        # tree is gone.  Writers that acquire a lifecycle lock after this
-        # point will find ``task_dir.exists() == False`` and skip.
-        for lock_path in lifecycle_root.glob("*.lifecycle"):
-            try:
-                lock_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-        for lock_sidecar in lifecycle_root.glob("*.lifecycle.lock"):
-            try:
-                lock_sidecar.unlink(missing_ok=True)
-            except OSError:
-                pass
-        # Phase 3: clean up all external cancellation markers now that the
-        # task tree is gone and any worker has already observed the deletion.
+
+        # Phase 3: clean up all external cancellation markers now that all task
+        # directories are gone and any worker has observed the deletion.
         if cancel_root.exists():
             for marker in cancel_root.glob("*.cancel"):
                 try:
@@ -1655,11 +1680,11 @@ class CADPipelineService:
             except (FileNotFoundError, json.JSONDecodeError, OSError):
                 pass  # Task may already be gone; still attempt deletion.
             self._delete_tree(task_dir)
-        # Clean up the lifecycle lock file + the external cancellation marker
-        # after the directory is gone (outside the lifecycle lock).  Any
-        # worker that was mid-flight has already observed the directory
-        # deletion and treats the task as cancelled.
-        self._cleanup_lifecycle_lock(task_id)
+        # Clean up only the external cancellation marker after the directory is
+        # gone (outside the lifecycle lock).  The per-task lifecycle lock file
+        # is intentionally retained so its inode (and lock identity) stays
+        # stable: a writer that acquires the same lifecycle lock right after we
+        # release it must find the *same* lock object, not a re-created one.
         self._clear_task_cancel(task_id)
 
     def stop_all_tasks(self) -> dict[str, Any]:
