@@ -247,30 +247,36 @@ def test_full_pipeline_parallel_mock_translation(pipeline_service, upload_files)
     results = {}
 
     def _process(name: str, file) -> dict:
-        # Set thread-local task name so the mock can distinguish tasks
+        # Set thread-local task name so the shared mock can distinguish tasks.
+        # The task name is stored per-thread, so each worker sees its own value.
         _thread_local.task_name = name
-        with patch(
-            "app.services.alibaba_ai_translation_service.alibaba_ai_translation_service.translate_batch",
-            side_effect=_thread_mock_translate,
-        ):
-            r = pipeline_service.process_upload(
-                uploaded_file=file,
-                target_language="zh",
-                converter_backend="dxf_only",
-                extract_only=False,
-                translation_mode="replace",
-            )
+        r = pipeline_service.process_upload(
+            uploaded_file=file,
+            target_language="zh",
+            converter_backend="dxf_only",
+            extract_only=False,
+            translation_mode="replace",
+        )
         results[name] = r
         return r
 
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        futures = [
-            executor.submit(_process, "building_a", upload_files["building_a"]),
-            executor.submit(_process, "building_b", upload_files["building_b"]),
-            executor.submit(_process, "building_c", upload_files["building_c"]),
-        ]
-        for f in futures:
-            f.result(timeout=60)
+    # Apply the mock once around the whole parallel block.  Entering/leaving a
+    # ``patch`` context from several worker threads concurrently is racy under
+    # mock (patches target the same module attribute) and can leak the mock past
+    # this test, breaking subsequent tests in the same process.  Patching a single
+    # time here serializes start/stop so restoration is deterministic.
+    with patch(
+        "app.services.alibaba_ai_translation_service.alibaba_ai_translation_service.translate_batch",
+        side_effect=_thread_mock_translate,
+    ):
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = [
+                executor.submit(_process, "building_a", upload_files["building_a"]),
+                executor.submit(_process, "building_b", upload_files["building_b"]),
+                executor.submit(_process, "building_c", upload_files["building_c"]),
+            ]
+            for f in futures:
+                f.result(timeout=60)
 
     # All completed
     for name, r in results.items():
