@@ -2,7 +2,8 @@
 
 A web-based CAD drawing translation system. It extracts text from DWG/DXF drawings, translates it in batches with LLM providers, and writes the translated text back into the drawings.
 
-This repository contains the Web application: FastAPI backend + React frontend.
+This repository contains the Web application (FastAPI backend + React frontend)
+and the maintained `cad-translate` CLI.
 
 ## Features
 
@@ -26,6 +27,13 @@ This repository contains the Web application: FastAPI backend + React frontend.
 - Node.js 18+
 - Windows 10/11
 - Optional: AutoCAD, GstarCAD, or ZWCAD for COM conversion
+
+> **DWG conversion recommendation:** ODA File Converter and LibreDWG are
+> supported fallback backends, but they are not the recommended first choice
+> for complex or production DWG files. For the best compatibility, install
+> AutoCAD, GstarCAD, or ZWCAD on the Windows host running the backend and use
+> its COM conversion path. Validate the converted DXF before translating it;
+> DXF-only work does not require a CAD application.
 
 ### Backend
 
@@ -54,7 +62,9 @@ Build a runtime bundle locally:
 powershell -ExecutionPolicy Bypass -File scripts/build_scale.ps1
 ```
 
-Output: `scale_release/` and `scale_release.zip`. The folder is generated locally and is not tracked in this repository. Starting with v2.0.0 the bundle also ships the `cad-translate` CLI under `cli/` (see `CLI.md` in the bundle).
+Output: `scale_release/` and `scale_release.zip`. The folder is generated
+locally and is not tracked in this repository. The bundle also ships the
+`cad-translate` CLI under `cli/` (see `CLI.md` in the bundle).
 
 ### CLI
 
@@ -63,7 +73,7 @@ The `cad-translate` CLI is a maintained component of this repository (see `agent
 ```powershell
 cd agent-harness
 pip install -e .
-cad-translate --version     # cad-translate, version 2.0.0
+cad-translate --version
 cad-translate --help
 cad-translate doctor         # environment sanity check
 ```
@@ -82,6 +92,91 @@ cad-translate tasks list
 
 JSON output is available on any command with `--json`. Configuration and output
 locations follow the backend; see `cad-translate doctor`.
+
+## Agent-assisted installation and recommended workflow
+
+The easiest and most reliable way to use this project is to ask a local
+coding Agent to install, configure, inspect the host, and run the pipeline.
+The Agent can decide whether the input needs a CAD converter, keep the
+original file unchanged, and report the generated output.
+
+### Install for an Agent
+
+From a fresh checkout on Windows:
+
+```powershell
+git clone https://github.com/reknottycat/cad-translation-web.git
+cd cad-translation-web
+python -m pip install -r backend\requirements.txt
+python -m pip install -e agent-harness
+cad-translate --help
+cad-translate doctor
+```
+
+If GitHub cannot be reached, use the [CNB mirror](https://cnb.cool/star_fu/cad-translation-web) instead:
+
+```powershell
+git clone https://cnb.cool/star_fu/cad-translation-web.git
+```
+
+When using the generated delivery bundle, install the bundled CLI with:
+
+```powershell
+cd cli
+python -m pip install -e .
+```
+
+`cad-translate doctor` reports runtime paths and configuration state; it is
+not a live AutoCAD activation test. DWG conversion requires a usable converter
+on the Windows host running the backend. Prefer AutoCAD, GstarCAD, or ZWCAD
+COM for complex or production drawings; ODA File Converter and LibreDWG are
+fallbacks that should be validated before use. A browser client cannot install
+or discover CAD software on its own.
+
+### Recommended prompt
+
+Copy and adapt this prompt for WorkBuddy, Codex, or another Agent with local
+file and terminal access:
+
+```text
+请先在本机准备 CAD Translation System：
+1. 优先从 GitHub 下载 https://github.com/reknottycat/cad-translation-web.git；
+   如果 GitHub 访问或下载失败，改用 CNB 镜像
+   https://cnb.cool/star_fu/cad-translation-web.git。
+2. 安装项目依赖和 cad-translate CLI，检查 Python、项目配置以及本机可用
+   的 AutoCAD / 浩辰 CAD / 中望 CAD / ODA / LibreDWG 转换后端。处理 DWG 时
+   优先使用 AutoCAD、浩辰 CAD 或中望 CAD 的 COM 转换；ODA/LibreDWG 只作为
+   没有厂商 CAD 时的备用，并在翻译前检查转换出的 DXF。不要修改或覆盖仓库
+   中的源文件。
+3. 先说明当前生效的配置、输入文件、输出目录和是否需要外部 LLM API Key。
+   如果项目的 LLM 提供商需要 API Key，请提示我配置；不要把 Key 写入 Git
+   仓库、日志或交付包。若你当前具备可直接调用的翻译能力且能安全读写本地
+   文件，可以使用你的能力完成文本翻译，不必虚构或提交一个项目 API Key。
+4. 帮我翻译“<文件完整路径>”，目标语言为俄文（Russian），翻译模式使用
+   “替换文本”（replace）：用俄文替换原文，不要使用追加（add）模式。
+   先保留原始文件，再把结果写入新的输出文件。
+5. 运行完成后检查翻译条数、未翻译条目、输出文件路径和是否存在异常；如果
+   DWG 转换或 API Key 不可用，请先停在可恢复的阶段并明确告诉我原因和下一步。
+```
+
+The CLI equivalent for the translation and backfill stages is:
+
+```powershell
+cad-translate pipeline translate-excel -i texts.xlsx --target-language ru --translation-mode replace
+cad-translate pipeline apply -i drawing.dxf -e texts_translated.xlsx --translation-mode replace
+```
+
+For a `.dwg` input, convert and extract first:
+
+```powershell
+cad-translate pipeline convert -i drawing.dwg
+cad-translate pipeline extract -i drawing.dxf
+```
+
+The Agent should use the JSON result or task metadata to locate the actual
+output rather than assuming a timestamped filename. The project's API-key path
+and the Agent's own model access are separate capabilities: one does not
+silently populate the other.
 
 ## Project Structure
 
@@ -134,7 +229,7 @@ The repository includes `.agents/skills/cad-translation-dev/` and `cad-translati
 Run the security audit with:
 
 ```powershell
-. .agents/skills/cad-translation-dev/scripts/security-audit.ps1
+& .\.agents\skills\cad-translation-dev\scripts\security-audit.ps1 -ReleaseDir scale_release
 ```
 
 ## Documentation

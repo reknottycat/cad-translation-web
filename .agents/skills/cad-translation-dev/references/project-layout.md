@@ -1,90 +1,131 @@
 # Project Layout Reference
 
-## Trusted Source (edit these)
+This map describes the current repository. Generated delivery directories are
+not alternate source trees.
 
-```
+## Maintained source
+
+~~~text
 backend/
 ├── app/
-│   ├── main.py                 # FastAPI entry: route registration, lifespan, static files
-│   ├── config.py               # Pydantic Settings: .env + LLM provider presets
-│   ├── database.py             # SQLAlchemy 2.0 models: Project, ProjectFile, ProcessingTask, etc.
-│   ├── security.py             # JWT / admin token guards
+│   ├── main.py                         # FastAPI app, lifespan, route registration, static serving
+│   ├── version.py                      # Canonical SemVer value
+│   ├── config.py                       # Pydantic settings, .env and runtime-config paths
+│   ├── database.py                     # SQLAlchemy models and database setup
+│   ├── security.py                     # Instance-level admin guard
+│   ├── api/routes/cad.py               # /api/cad/* endpoints
 │   ├── routers/
-│   │   ├── translation.py      # /api/translation/* (text, batch, excel, config, providers)
-│   │   ├── projects.py         # /api/projects/*
-│   │   └── files.py            # /api/files/*
-│   ├── api/routes/cad.py       # /api/cad/* (extract, apply, download, pipeline)
+│   │   ├── translation.py              # /api/translation/*
+│   │   ├── projects.py                 # /api/projects/*
+│   │   └── files.py                    # /api/files/*
 │   ├── services/
-│   │   ├── llm/translation_service.py      # Unified LLM engine: single + batch + JSON mode
-│   │   ├── cad_pipeline_service.py         # Full pipeline: upload → convert → extract → translate → apply
-│   │   ├── runtime_config_service.py       # Runtime config CRUD + API key masking
-│   │   ├── config_manager.py               # JSON config file I/O
-│   │   └── tasks/                          # Celery tasks: cad_tasks.py, translation_tasks.py
+│   │   ├── cad_pipeline_service.py     # upload → convert → extract → translate → apply
+│   │   ├── autocad_converter.py        # AutoCAD COM bridge
+│   │   ├── haochen_optimized_converter.py # GStarCAD/浩辰 and compatible COM bridge
+│   │   ├── com_converter_cli.py        # Dedicated COM subprocess entry
+│   │   ├── runtime_config_service.py   # Runtime config and API-key masking
+│   │   ├── excel_processor.py          # Excel translation operations
+│   │   ├── llm/translation_service.py  # Unified LLM engine
+│   │   └── tasks/                      # Celery task definitions
 │   ├── functions/
-│   │   ├── dwg_converter.py    # DWG→DXF: acadsharp / ODA / COM / dxf_only
-│   │   ├── text_extractor.py   # ezdxf text extraction → Excel
-│   │   ├── text_applier.py     # Apply translations back to DXF (replace / add / newline)
-│   │   └── translator.py       # Legacy translator wrapper
-│   ├── schemas/                # Pydantic request/response models
-│   └── utils/                  # File utilities, safe filename, path traversal guards
+│   │   ├── dwg_converter.py            # Backend selection and DWG→DXF orchestration
+│   │   ├── autocad_discovery.py        # AutoCAD registry/process discovery
+│   │   ├── com_activation_probe.py     # Bounded live COM activation classification
+│   │   ├── com_instance_guard.py       # Usable-instance and stale-proxy protection
+│   │   ├── text_extractor.py           # DXF text extraction
+│   │   ├── text_applier.py             # Translation backfill into DXF
+│   │   └── translator.py               # Compatibility translation wrapper
+│   ├── schemas/                        # Pydantic request/response models
+│   └── utils/
+│       ├── file_utils.py               # Safe filenames, paths, and upload validation
+│       └── locking.py                  # Cross-process locks and atomic writes
 ├── requirements.txt
-├── .env / .env.example
-└── run_server.py               # uvicorn launcher
+├── .env.example
+└── run_server.py                       # Uvicorn launcher
 
 frontend/
 ├── src/
-│   ├── main.tsx                # App entry
-│   ├── App.tsx                 # Root: currently mounts TranslationWorkbenchPage directly
-│   ├── pages/
-│   │   ├── TranslationWorkbenchPage.tsx   # Main workbench UI
-│   │   └── ModelGatewayPage.tsx           # Model/provider config UI
-│   ├── components/
-│   │   ├── CADWorkflow.tsx     # 3-step CAD workflow component
-│   │   └── TranslationConfig.tsx
-│   └── services/api.ts         # Axios wrapper, proxies /api to localhost:8000
-├── vite.config.ts              # Vite config: /api proxy to localhost:8000
+│   ├── main.tsx                        # React entry
+│   ├── App.tsx                         # Current root composition
+│   ├── pages/                          # Workbench, translation, project, and gateway pages
+│   ├── components/                     # CAD workflow and shared UI components
+│   └── services/api.ts                 # Axios API wrapper
+├── vite.config.ts                      # Dev proxy and build configuration
 └── package.json
-```
 
-## Build Artifacts (do NOT edit directly)
+agent-harness/
+├── cad_translate/
+│   ├── cli.py                          # Click command tree; command is cad-translate
+│   ├── operations.py                   # CLI-to-backend operation adapters
+│   ├── bridge.py                       # Locate/import backend trusted code
+│   ├── store.py                        # Project/task file state
+│   └── __main__.py
+├── setup.py                            # Reads version from ../backend/app/version.py
+├── pyproject.toml                      # Dynamic package metadata and entry point
+├── README.md
+└── MANIFEST.in
+~~~
 
-```
-scale_release/                  # Generated by scripts/build_scale.ps1
-├── backend/                    # Copied from backend/ (excludes tests, .env, .db, __pycache__)
-├── frontend/dist/              # Built static assets
-├── tools/                      # Runtime tools (libredwg)
-├── docs/modern/                # Cleaned docs
-├── start_delivery.bat          # One-click launcher
+The active backend routes are registered from backend/app/main.py. The separate
+translation-FZH.py module is retained in the source tree for compatibility but
+is not the registered modern router.
+
+## Generated delivery artifacts — do not edit or commit
+
+~~~text
+scale_release/
+├── backend/                            # Runtime backend, without dev-only files
+├── cli/                                # Bundled cad_translate package and metadata
+├── frontend/dist/                      # Built static frontend; intentional dist
+├── tools/                              # Runtime tools, including LibreDWG
+├── docs/modern/                        # Release documentation subset
+├── start_delivery.bat                 # Web launcher
+├── cad-cli.bat                         # Direct bundled CLI launcher
+├── install_cli.bat                     # Optional editable CLI installer
+├── CLI.md
+├── README.md
 └── requirements.txt
 
-scale_release.zip               # Compressed delivery package
-```
+scale_release.zip                       # Compressed copy of the bundle
+scale_release_exe/                      # Optional standalone EXE build output
+~~~
 
-## Legacy Code (compatibility only)
+The build script creates these outputs from source. They are ignored by Git.
+Do not fix a bundle by editing files under scale_release; fix the source or the
+build script and rebuild. In a OneDrive workspace, verify reparse-point and
+staging paths before replacing generated directories.
 
-```
-trans_CAD_gui_V1.0/             # customtkinter desktop GUI
-命令行专用/                      # Standalone CLI scripts
-├── main_processor.py
-├── simple_processor.py
-└── 提取.py
-```
+## Legacy compatibility code
 
-## Key Routers Mapping
+~~~text
+trans_CAD_gui_V1.0/                      # customtkinter desktop application
+命令行专用/                               # older standalone pipeline scripts
+CLI-Anything/                            # generic plugin framework, not the CAD CLI source
+electron_release/                       # older Electron experiment, if present
+~~~
 
-| Prefix | Router File | Domain |
-|--------|-------------|--------|
-| `/api/translation` | `routers/translation.py` | LLM translation APIs |
-| `/api/cad` | `api/routes/cad.py` | CAD pipeline (extract, apply, download) |
-| `/api/projects` | `routers/projects.py` | Project management |
-| `/api/files` | `routers/files.py` | File upload/download |
+These trees can explain old behavior but are not the default implementation.
 
-## Database Models
+## Router mapping
 
-| Model | Purpose |
-|-------|---------|
-| `Project` | Translation project |
-| `ProjectFile` | Uploaded DWG/DXF/Excel files |
-| `ProcessingTask` | Async task tracking |
-| `TextExtraction` | Extracted text entries |
-| `TranslationCache` | Cached LLM translations |
+| Prefix | Source | Domain |
+|--------|--------|--------|
+| /api/translation | backend/app/routers/translation.py | Text, batch, Excel, providers, runtime translation config |
+| /api/cad | backend/app/api/routes/cad.py | CAD upload, extraction, translation application, downloads, task control |
+| /api/projects | backend/app/routers/projects.py | Project CRUD and processing status |
+| /api/files | backend/app/routers/files.py | Project file upload/list/detail/download |
+
+All sensitive project/file/CAD/config/translation routes use
+require_admin_access when ENABLE_ADMIN_GUARD=true. Public liveness and
+language-list endpoints are documented in api-routes.md.
+
+## Data and output boundaries
+
+- Default SQLite is resolved under the backend base directory from DATABASE_URL;
+  get_upload_path(), get_output_path(), and get_temp_path() create the
+  configured directories.
+- CAD task artifacts live below the configured output root, with a unique task
+  directory and lifecycle locking. Runtime JSON configuration is outside the
+  repository by default and uses the cli-anything-cad/config.json path.
+- The application is single-tenant. Unique task paths and locks prevent common
+  collisions, but they are not per-user authorization or data partitioning.

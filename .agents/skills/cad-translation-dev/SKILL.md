@@ -1,102 +1,160 @@
 ---
 name: cad-translation-dev
-description: CAD Translation System development, build, and release assistant. Use when working on the CAD Translation System project for: (1) Building or releasing the scale_release runtime bundle, (2) Modifying backend (FastAPI) or frontend (React) code, (3) Performing security audits on the release bundle, (4) Configuring LLM providers or translation parameters, (5) Debugging translation pipeline issues, (6) Adding new CAD converter backends or insertion modes, (7) Any development, testing, or maintenance task within this project.
+description: CAD Translation System development, testing, security audit, and local release guidance. Use for changes to the FastAPI backend, React frontend, maintained cad-translate CLI, CAD converter backends, translation workflow, concurrency behavior, packaging, or project documentation.
 ---
 
 # CAD Translation System — Development Skill
 
-## Project at a Glance
+## Project at a glance
 
-A CAD drawing translation system with three runtime surfaces:
-- **Web**: React 18 + Vite frontend, FastAPI backend
-- **CLI**: `cli-anything-cad` installable package in `agent-harness/`
-- **Desktop GUI** (legacy): `trans_CAD_gui_V1.0/`
+The repository has three runtime surfaces:
 
-**Trusted source**: Only `backend/` and `frontend/` are live source. `scale_release/` is a build artifact — never edit directly.
+- **Web**: React 18/Vite frontend plus the FastAPI backend.
+- **CLI**: the maintained cad-translate package in agent-harness/cad_translate/. It delegates to the trusted backend implementation; the command is not cli-anything-cad.
+- **Legacy desktop/command-line code**: trans_CAD_gui_V1.0/ and 命令行专用/ are compatibility code. Change them only when the task explicitly targets the legacy surface.
 
-## Critical Paths
+Maintained source is under backend/, frontend/, and agent-harness/ (including
+the CLI packaging metadata). The project skill files and release scripts are
+also maintained documentation/tooling. scale_release/, scale_release.zip, and
+scale_release_exe/ are generated artifacts: never edit them as source and
+never commit them. backend/ is the runtime source of truth for shared CAD and
+translation behavior.
 
-| Task | Entry Point |
+## Critical paths
+
+| Task | Entry point |
 |------|-------------|
-| Start backend | `backend/run_server.py` or `uvicorn app.main:app --reload` |
-| Start frontend | `cd frontend && npm run dev` |
-| Start Celery | `backend/run_celery.py` |
-| Build release | `scripts/build_scale.ps1` |
-| Build frontend dist | `cd frontend && npm run build` |
-| API docs | `http://localhost:8000/api/docs` |
-| Runtime config | `~/.config/cli-anything-cad/config.json` |
+| Start backend | cd backend; python run_server.py |
+| Start frontend | cd frontend; npm run dev |
+| Start Celery worker | cd backend; python run_celery.py |
+| Install/test CLI locally | cd agent-harness; python -m pip install -e .; cad-translate --help |
+| CLI packaging tests | python -m pytest tests/cli/test_cli_packaging.py -q |
+| Full test suite | `$env:PYTEST_DISABLE_PLUGIN_AUTOLOAD="1"; python -m pytest tests -q` |
+| Build runtime bundle | scripts/build_scale.ps1 |
+| Audit a bundle | .agents/skills/cad-translation-dev/scripts/security-audit.ps1 -ReleaseDir <absolute-or-relative-path> |
+| API documentation | http://localhost:8000/api/docs or /api/redoc |
+| Canonical release version | backend/app/version.py (__version__, SemVer) |
+| Runtime config | %USERPROFILE%\\.config\\cli-anything-cad\\config.json, unless an override is set |
 
-## Development Workflow
+The test command disables auto-loaded third-party pytest plugins because old
+sibling projects in this workspace can otherwise be collected accidentally.
+Prefer the repository's backend virtual environment when it exists.
 
-### 1. Backend Change
+## Development workflow
 
-1. Edit files under `backend/app/`
-2. Restart `run_server.py` (or rely on `--reload`)
-3. Test via Swagger UI at `/api/docs`
-4. Run tests: `python -m pytest tests/backend/ -v`
+### Backend or CAD pipeline change
 
-### 2. Frontend Change
+1. Edit the active implementation under backend/app/.
+2. For routes, update the corresponding module under backend/app/routers/ or backend/app/api/routes/.
+3. Keep file/path safety checks, task-directory isolation, and admin-guard behavior intact.
+4. Run focused tests, then the full tests/ suite. If the change affects packaging, also run tests/cli/test_cli_packaging.py.
+5. Update the relevant README or docs/modern/ document when behavior, API, configuration, or the build process changes.
 
-1. Edit files under `frontend/src/`
-2. Vite dev server hot-reloads automatically
-3. Type-check: `cd frontend && npx tsc --noEmit`
-4. Build for release: `cd frontend && npm run build`
+### Frontend change
 
-### 3. Build Release Bundle
+1. Edit frontend/src/; the active root component is App.tsx and currently mounts the workbench directly.
+2. Use npm run lint and npm run build from frontend/.
+3. Check API paths against frontend/src/services/api.ts and references/api-routes.md.
 
-```powershell
-# Full rebuild (includes frontend build)
+### CLI change
+
+1. Edit agent-harness/cad_translate/ and keep the CLI as a thin facade over backend/app.
+2. Keep version metadata dynamic: agent-harness/setup.py reads backend/app/version.py; do not add a second hard-coded release version.
+3. Verify cad-translate --version, cad-translate --help, cad-translate doctor, and the affected command group. Use --json when testing machine-readable output.
+4. Run the CLI packaging tests and confirm that a clean delivery bundle contains cli/, cad-cli.bat, install_cli.bat, and CLI.md.
+
+### Local release bundle
+
+~~~powershell
+# Full build, including frontend/dist
 powershell -ExecutionPolicy Bypass -File scripts/build_scale.ps1
 
-# Skip frontend build if already built
+# Use only when frontend/dist is already the intended build
 powershell -ExecutionPolicy Bypass -File scripts/build_scale.ps1 -SkipFrontendBuild
-```
+~~~
 
-Produces `scale_release/` + `scale_release.zip`.
+The script regenerates scale_release/ and scale_release.zip under the selected
+root. These outputs are ignored and must remain untracked. Audit both the
+directory and, when publishing, the ZIP contents; verify required runtime
+files, CLI smoke behavior, and a SHA-256 checksum before attaching an artifact
+to a GitHub Release. Do not manually delete a broad OneDrive path to clean a
+build. If the checkout is a OneDrive reparse-point workspace, use a separately
+verified local/G: staging location or a disposable local checkout, and resolve
+the exact absolute target before replacing generated output.
 
-### 4. Security Audit Release
+Run the read-only audit with:
 
-Run the audit script and manually verify results:
+~~~powershell
+& .\.agents\skills\cad-translation-dev\scripts\security-audit.ps1 -ReleaseDir <bundle-path>
+~~~
 
-```powershell
-. .agents/skills/cad-translation-dev/scripts/security-audit.ps1
-```
+The audit must reject databases, local configuration/secrets, virtual
+environments, caches, logs, tests, source frontend files, and packaging
+leftovers while allowing the intentional frontend/dist/ and CLI runtime files.
+See references/security-checklist.md.
 
-Or run checks manually — see [references/security-checklist.md](references/security-checklist.md).
+## Agent-assisted use and API-key boundary
 
-**Must verify**:
-- No `.db` files in `scale_release/`
-- No `node_modules` in `scale_release/`
-- No `runtime_config.local.json` (user config) in `scale_release/`
-- No `.env` files (except `.env.example`)
-- No hardcoded API keys in any `scale_release/` file
+This skill is an instruction set; invoking it does not itself require a CAD
+project API key. When the user asks the current Agent to inspect drawings,
+extract text, translate a bounded result, or explain a failure, the Agent may
+use the model and tools already available in the current authorized session.
+Do not ask the user to configure a provider key merely to activate this skill.
 
-### 5. Update Release After Backend/Frontend Changes
+Keep the execution modes separate:
 
-1. Build frontend: `cd frontend && npm run build`
-2. Delete old `scale_release/` and `scale_release.zip`
-3. Run `scripts/build_scale.ps1`
-4. Run security audit
-5. Remove any leaked files the script missed
-6. Commit `scale_release/` and `scale_release.zip`
+- **Agent-assisted mode**: the current Agent performs the reasoning or
+  translation in-session and writes only the requested artifacts. This uses the
+  Agent runtime's existing access and may have context, file-size, rate, or
+  privacy limits. It does not create a reusable project credential.
+- **Project runtime mode**: the Web app, cad-translate pipeline commands, Celery
+  workers, and unattended/bulk jobs call the configured LLM provider from the
+  project runtime. These still need the provider's configured API key or other
+  supported authentication, unless the selected provider is a local/no-key
+  backend.
 
-## Code Standards
+Before sending drawing text to an Agent or remote provider, confirm the user's
+authorization and the data boundary. Never print, commit, or place a supplied
+key in a skill file, project JSON, release bundle, or task log. If an Agent
+cannot access the needed model/tool or the input is too large, report that
+boundary clearly and use the project's configured runtime only when the user
+has provided and authorized it.
 
-- **Module limit**: 800 lines max per file (project rule in `.trae/rules/project_rules.md`)
-- **Python**: PEP 8 + type annotations (`from __future__ import annotations`)
-- **Frontend**: PascalCase components, camelCase variables/functions
-- **After config changes**: Update `AGENTS.md` if relevant
+## Windows CAD and internal multi-user boundary
 
-## Key Configuration
+- AutoCAD, GStarCAD/浩辰, and ZWCAD COM are capabilities of the Windows host running the backend, not of a browser client. Detection enumerates registered COM ProgIDs and the process table; it does not install CAD software. For DWG compatibility, prefer an installed vendor CAD COM backend; ODA File Converter and LibreDWG are fallback options and should be validated before production use. See docs/modern/AUTOCAD_COM_DETECTION.md.
+- A registered ProgID is not proof that activation works. Bounded activation probes classify timeouts/failures, and real COM conversion keeps activation, document work, and release in one COM thread/process. COM conversions are serialized by default (CAD_COM_CONCURRENCY=1).
+- Multiple browser clients can submit independent tasks: task IDs and output directories are unique, metadata/config writes use stable sidecar locks plus atomic replacement, SQLite has a busy timeout, and Excel output names are UUID-prefixed. These safeguards prevent common collisions; they do not create accounts or tenant boundaries.
+- The system is single-tenant. ENABLE_ADMIN_GUARD protects the whole instance with ADMIN_API_TOKEN; it is not per-user authorization. For internal multi-user deployment, use a durable shared upload/output location, a database/worker topology appropriate for concurrent access, explicit CORS origins, and a deliberate COM serialization limit. Do not expose the default HTTP service publicly without a TLS-terminating reverse proxy.
+- LLM rate-limit buckets are process-local. Recalculate effective capacity when running multiple workers.
+
+## Code and documentation standards
+
+- Keep each module under 800 lines (.trae/rules/project_rules.md).
+- Python uses PEP 8, type annotations, and from __future__ import annotations for new modules.
+- Frontend components use PascalCase; variables and functions use camelCase.
+- Follow SemVer. Change the canonical value in backend/app/version.py, then verify the backend and CLI report the same version; do not hard-code a version in long-lived skill or README text.
+- Every new feature or metric must define and verify its temporal shift. Prevent look-ahead leakage: a feature at time t must use only data available at or before the declared shifted observation time.
+- After behavior/config/API changes, update help text, errors, metadata, README, and the relevant docs/modern/ page. Keep one canonical source for fast-changing facts and link to it.
+- Before completion, run git diff --check, remove generated caches/logs from the change set, and verify the final state rather than documenting abandoned alternatives.
+
+## Key configuration
 
 | Config | Location | Purpose |
 |--------|----------|---------|
-| Static env | `backend/.env` | DB, Redis, JWT, converter paths |
-| Runtime config | `~/.config/cli-anything-cad/config.json` | LLM provider, model, API keys |
-| Provider presets | `backend/app/config.py` | Built-in 10+ vendor presets |
+| Static environment | backend/.env (template: backend/.env.example) | DB, Redis, host/port, converter and guard settings |
+| Environment-file override | CAD_TRANSLATION_ENV_FILE | Select a different .env file |
+| Runtime config override | CAD_TRANSLATION_RUNTIME_CONFIG_FILE | Select a different JSON runtime config |
+| Runtime config default | XDG_CONFIG_HOME/cli-anything-cad/config.json or Path.home()/.config/cli-anything-cad/config.json | LLM/CAD defaults and provider settings |
+| Provider presets | backend/app/config.py and the LLM service | Built-in provider/model defaults |
 
-## Reference Documents
+Never commit real API keys, .env, runtime local JSON, databases, logs, or
+generated release output.
 
-- **Project layout**: [references/project-layout.md](references/project-layout.md) — directory/module navigation
-- **Security checklist**: [references/security-checklist.md](references/security-checklist.md) — release audit items
-- **API routes**: [references/api-routes.md](references/api-routes.md) — backend endpoint quick reference
+## Reference documents
+
+- references/project-layout.md — maintained source, generated artifacts, and legacy boundaries.
+- references/security-checklist.md — bundle audit and publication gates.
+- references/api-routes.md — verified backend endpoint quick reference.
+- docs/modern/AUTOCAD_COM_DETECTION.md — AutoCAD/浩辰/中望 detection, activation bounds, and host boundary.
+- docs/modern/RELEASE_SCALE.md — runtime and EXE packaging behavior.

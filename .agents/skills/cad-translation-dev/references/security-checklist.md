@@ -1,77 +1,51 @@
 # Release Security Checklist
 
-Run this checklist before every `scale_release` commit.
+Run this read-only checklist against a freshly generated runtime bundle before
+publishing it. scale_release/ and scale_release.zip are generated artifacts,
+not files to commit.
 
-## Automated Checks
+## Required bundle content
 
-Run `scripts/security-audit.ps1` (or copy the checks below).
+- backend/run_server.py
+- backend/app/version.py
+- frontend/dist/index.html
+- tools/libredwg/0.13.3-win64/dwg2dxf.exe
+- cli/cad_translate/cli.py and cli/setup.py
+- cad-cli.bat, install_cli.bat, CLI.md, start_delivery.bat
+- requirements.txt
 
-## Manual Verification
+## Forbidden content
 
-### 1. Database Files
-- [ ] No `*.db` files anywhere in `scale_release/`
-- Common leak: `scale_release/backend/cad_translation.db`
-- Fix: `Remove-Item scale_release/backend/*.db -Force`
+- databases: *.db, *.sqlite, *.sqlite3
+- .env or non-example .env.* files
+- runtime_config.local.json, local settings, API keys, logs
+- outputs/, uploads/, temp/, logs/
+- .venv/, venv/, env/, node_modules/, __pycache__/, pytest/mypy/ruff caches
+- .pyc, .egg-info, tests/, test/, testing/, test_*.py, conftest.py
+- frontend/src/ and Electron files at the bundle root
 
-### 2. Node Modules
-- [ ] No `node_modules/` directory in `scale_release/`
-- Fix: `Remove-Item -Recurse -Force scale_release/node_modules`
+frontend/dist/ is intentional and must be present. The bundled CLI files are
+intentional runtime content and must not be rejected as development files.
 
-### 3. Runtime User Config
-- [ ] No `runtime_config.local.json` in `scale_release/`
-- This file contains user API keys, target language, model preferences
-- Fix: `Remove-Item scale_release/backend/config/runtime_config.local.json -Force`
-- Keep `runtime_config.example.json` — it is safe (no real keys)
+## Audit and smoke commands
 
-### 4. Environment Files
-- [ ] No `.env` files (except `.env.example`)
-- `.env.example` is safe — it contains only placeholders
-- Fix: `Remove-Item scale_release/backend/.env -Force` (keep `.env.example`)
+From the repository root:
 
-### 5. API Key Leaks
-- [ ] No hardcoded keys in `scale_release/backend/app/config.py`
-- Check pattern: `= "sk-..."` or `= "ak-..."` or long alphanumeric strings
-- Safe: `Field(default="")` placeholders
+~~~powershell
+& .\.agents\skills\cad-translation-dev\scripts\security-audit.ps1 -ReleaseDir <bundle-path>
+~~~
 
-### 6. Test Files
-- [ ] No `test_*.py` files in `scale_release/`
-- Build script excludes these, but verify manually
+Then, in a clean runtime environment:
 
-### 7. Source Code Leaks
-- [ ] No `frontend/src/` in `scale_release/`
-- [ ] No `__pycache__/` directories
-- [ ] No `.pytest_cache/` directories
+~~~powershell
+cad-cli.bat --version
+cad-cli.bat --help
+cad-cli.bat doctor
+~~~
 
-### 8. Electron Artifacts (if previously mixed)
-- [ ] No `main.js`, `preload.js`, `package.json` in `scale_release/` root
-- These are from old `electron_release` experiments
+Check the directory and ZIP separately. Verify the CLI and backend use the
+same SemVer value from backend/app/version.py, record the ZIP SHA-256, and
+confirm the GitHub Release asset matches the audited ZIP.
 
-## Final Directory Structure Verification
-
-`scale_release/` should contain **only**:
-
-```
-backend/
-  app/
-  config/
-    runtime_config.example.json
-  config_guide.md
-  config_validator.py
-  ... (other runtime files)
-docs/modern/
-frontend/dist/
-tools/
-README.md
-requirements.txt
-start_delivery.bat
-```
-
-## Post-Cleanup Verification Command
-
-```powershell
-cd scale_release
-Get-ChildItem -Recurse -Filter "*.db"
-Get-ChildItem -Recurse -Filter "runtime_config.local.json"
-Get-ChildItem -Recurse -Filter ".env" | Where-Object { $_.Name -ne ".env.example" }
-if (Test-Path "node_modules") { Write-Error "node_modules found!" }
-```
+Never fix a bundle by editing scale_release files or by recursively deleting an
+unresolved OneDrive path. Fix the source/build script, rebuild, and audit again.

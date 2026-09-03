@@ -21,7 +21,8 @@
 
 **CAD Translation System** 是一套面向工程图纸的端到端智能翻译系统。它能够将 **DWG/DXF** 格式 CAD 图纸中的文字内容自动提取、批量翻译，并以多种模式回填到图纸中。
 
-本仓库只包含 Web 应用：FastAPI 后端 + React 前端。
+本仓库包含 Web 应用（FastAPI 后端 + React 前端）以及持续维护的
+`cad-translate` CLI。
 
 ## 核心功能
 
@@ -47,6 +48,12 @@
 - Node.js 18+
 - Windows 10/11
 - 可选：AutoCAD、浩辰 CAD 或中望 CAD（COM 转换）
+
+> **DWG 文件建议：** ODA File Converter 和 LibreDWG 可以作为备用转换后端，
+> 但不建议作为复杂或生产 DWG 文件的首选。为了获得更好的兼容性，建议在
+> 运行后端的 Windows 主机安装 AutoCAD、浩辰 CAD 或中望 CAD，并优先使用其
+> COM 转换能力。转换完成后先检查 DXF，再进入翻译流程；仅处理 DXF 时不需要
+> 安装 CAD 软件。
 
 ### 后端
 
@@ -75,7 +82,8 @@ npm run dev
 powershell -ExecutionPolicy Bypass -File scripts/build_scale.ps1
 ```
 
-产物为 `scale_release/` 和 `scale_release.zip`。该目录由构建脚本生成，不入库。自 v2.0.0 起，交付包还内置 `cad-translate` CLI（位于包内 `cli/`，详见 `CLI.md`）。
+产物为 `scale_release/` 和 `scale_release.zip`。该目录由构建脚本生成，
+不入库。交付包还内置 `cad-translate` CLI（位于包内 `cli/`，详见 `CLI.md`）。
 
 ### CLI
 
@@ -84,7 +92,7 @@ powershell -ExecutionPolicy Bypass -File scripts/build_scale.ps1
 ```powershell
 cd agent-harness
 pip install -e .
-cad-translate --version     # cad-translate, version 2.0.0
+cad-translate --version
 cad-translate --help
 cad-translate doctor         # 环境自检
 ```
@@ -102,6 +110,88 @@ cad-translate tasks list
 ```
 
 任意命令加 `--json` 即可输出 JSON。配置与输出位置与后端保持一致；可用 `cad-translate doctor` 查看。
+
+## 给 Agent 的安装与推荐使用方式
+
+推荐直接让 WorkBuddy、Codex 或其他具备本地文件和终端权限的 Agent 帮你
+安装、配置并执行翻译。这样 Agent 可以先检查当前 Windows 主机上的 CAD
+转换能力，按实际生效配置运行流程，并返回准确的输出位置。
+
+### 给 Agent 的安装命令
+
+在 Windows 的全新目录中执行：
+
+```powershell
+git clone https://github.com/reknottycat/cad-translation-web.git
+cd cad-translation-web
+python -m pip install -r backend\requirements.txt
+python -m pip install -e agent-harness
+cad-translate --help
+cad-translate doctor
+```
+
+如果 GitHub 无法访问或下载失败，改用 [CNB 镜像](https://cnb.cool/star_fu/cad-translation-web)：
+
+```powershell
+git clone https://cnb.cool/star_fu/cad-translation-web.git
+```
+
+如果使用已经生成的交付包，则在包内安装 CLI：
+
+```powershell
+cd cli
+python -m pip install -e .
+```
+
+`cad-translate doctor` 用于查看运行时路径和配置状态，**不等于**实时
+激活 AutoCAD。处理 DWG 时，转换后端必须安装或存在于运行后端的 Windows
+主机上。复杂或生产图纸建议优先使用 AutoCAD、浩辰 CAD 或中望 CAD 的 COM
+转换；ODA File Converter 和 LibreDWG 只作为备用，并应在使用前检查转换
+结果。浏览器客户端不能替主机安装或探测 CAD 软件。
+
+### 推荐直接发给 Agent 的提示词
+
+下面的内容可以直接复制给 WorkBuddy、Codex 或其他具备本地文件操作权限
+的 Agent，再把 `<文件完整路径>` 换成实际文件：
+
+```text
+请先在本机准备 CAD Translation System：
+1. 优先从 GitHub 下载 https://github.com/reknottycat/cad-translation-web.git；
+   如果 GitHub 访问或下载失败，改用 CNB 镜像
+   https://cnb.cool/star_fu/cad-translation-web.git。
+2. 安装项目依赖和 cad-translate CLI，检查 Python、项目配置以及本机可用
+   的 AutoCAD / 浩辰 CAD / 中望 CAD / ODA / LibreDWG 转换后端。处理 DWG 时
+   优先使用 AutoCAD、浩辰 CAD 或中望 CAD 的 COM 转换；ODA/LibreDWG 只作为
+   没有厂商 CAD 时的备用，并在翻译前检查转换出的 DXF。不要修改或覆盖仓库
+   中的源文件。
+3. 先说明当前生效的配置、输入文件、输出目录和是否需要外部 LLM API Key。
+   如果项目的 LLM 提供商需要 API Key，请提示我配置；不要把 Key 写入 Git
+   仓库、日志或交付包。若你当前具备可直接调用的翻译能力且能安全读写本地
+   文件，可以使用你的能力完成文本翻译，不必虚构或提交一个项目 API Key。
+4. 帮我翻译“<文件完整路径>”，目标语言为俄文（Russian），翻译模式使用
+   “替换文本”（replace）：用俄文替换原文，不要使用追加（add）模式。
+   先保留原始文件，再把结果写入新的输出文件。
+5. 运行完成后检查翻译条数、未翻译条目、输出文件路径和是否存在异常；如果
+   DWG 转换或 API Key 不可用，请先停在可恢复的阶段并明确告诉我原因和下一步。
+```
+
+对应的 CLI 翻译与回填命令为：
+
+```powershell
+cad-translate pipeline translate-excel -i texts.xlsx --target-language ru --translation-mode replace
+cad-translate pipeline apply -i drawing.dxf -e texts_translated.xlsx --translation-mode replace
+```
+
+如果输入是 `.dwg`，先执行转换和文字提取：
+
+```powershell
+cad-translate pipeline convert -i drawing.dwg
+cad-translate pipeline extract -i drawing.dxf
+```
+
+Agent 应根据命令的 JSON 结果或任务元数据定位实际输出，不要自行假设带有
+时间戳的文件名。项目 API Key 与 Agent 自身可调用的模型能力是两套独立
+能力：Agent 不会静默替项目写入 API Key。
 
 ## 项目结构
 
@@ -154,7 +244,7 @@ cad-code/
 运行安全审计：
 
 ```powershell
-. .agents/skills/cad-translation-dev/scripts/security-audit.ps1
+& .\.agents\skills\cad-translation-dev\scripts\security-audit.ps1 -ReleaseDir scale_release
 ```
 
 ## 文档索引
@@ -235,7 +325,7 @@ powershell -ExecutionPolicy Bypass -File scripts/build_scale_exe_nuitka.ps1
 - 自动模式会按探测结果筛除确定不可用的 COM 后端，同时保留 `haochen_com` → `autocad_com` → ODA/LibreDWG 的回退链；COM 转换仍默认单实例串行（`CAD_COM_CONCURRENCY=1`）。
 - **有界 COM 激活**：**注册 ≠ 一定可激活**。浩辰（GStarCAD）/ 中望（ZWCAD）/ AutoCAD 的激活统一由单一环境变量 `CAD_COM_ACTIVATION_TIMEOUT` 约束（默认 **30s**，真实 AutoCAD 2026 冷启动约 6.5s，留足余量）。探测阶段为**仅分类**：COM 对象在 worker 线程自己的 apartment 内完成激活/读取 `Version`/`Documents`/释放，**绝不跨线程交给调用方**；真实转换在专用 COM 子进程内**同步**激活，激活/打开文档/转换/释放保持在同一 COM 线程/进程，父进程子进程超时可做进程级回收，避免遗留 `acad.exe`。对「已注册但激活超时/失败（挂起、位宽/权限/损坏）」的 COM 后端归类为 `activation_timeout` / `activation_failed` 并跳过，避免长时间卡住；自动模式不把「仅注册但不可激活」的浩辰/中望误判为可用并排在回退链最前。ProgID 列表做**大小写不敏感去重**，避免重复尝试与诊断噪声。
 - **探测后紧接连接的陈旧 proxy 韧性**：探测可能启动并立即 `Quit` 一个 CAD 实例，其 ROT 条目会短暂残留；紧接着的连接若用 `GetActiveObject` 可能拿到指向正在退出的实例的**陈旧 active proxy**。现在探测在 `Quit` 后会等待该实例离开 ROT（有界，`DEFAULT_QUIT_CONFIRM_TIMEOUT`），连接层则校验 `Version`/`Documents`，遇到不可用的陈旧 active proxy 自动改用 `Dispatch` 重新启动一个可用实例，从而避免探测/转换留下 `acad.exe` / ROT 残留。
-- **AutoCAD 安装与 COM 能力属于运行后端的 Windows 主机，不属于任何浏览器客户端**；本系统仍为**单租户**，不提供 per-user 任务隔离。所谓「自动检测」仅指后端能在自身主机上找到所调用的 AutoCAD。后端**不会自动安装 AutoCAD**；缺失时应改用 ODA / LibreDWG 等后端，或安装并注册 AutoCAD。
+- **AutoCAD 安装与 COM 能力属于运行后端的 Windows 主机，不属于任何浏览器客户端**；本系统仍为**单租户**，不提供 per-user 任务隔离。所谓「自动检测」仅指后端能在自身主机上找到所调用的 AutoCAD。后端**不会自动安装 AutoCAD**；缺失时可以暂用 ODA / LibreDWG 作为备用，但复杂或生产 DWG 仍建议安装并注册 AutoCAD、浩辰 CAD 或中望 CAD，并检查转换结果。
 - 参见 [AUTOCAD_COM_DETECTION.md](docs/modern/AUTOCAD_COM_DETECTION.md)。
 
 - **`ENABLE_ADMIN_GUARD` 默认开启且 fail-closed**。在 `backend/.env` 设置 `ADMIN_API_TOKEN` 后，所有敏感任务/项目/文件/配置/翻译端点都要求 Token；调用方以 `X-Admin-Token: <token>` 或 `Authorization: Bearer <token>` 认证。

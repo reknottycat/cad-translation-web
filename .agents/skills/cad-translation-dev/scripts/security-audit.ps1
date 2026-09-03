@@ -1,5 +1,9 @@
 # Security Audit for scale_release/
-# Run from project root: . .agents/skills/cad-translation-dev/scripts/security-audit.ps1
+# Run from project root:
+#   & .\.agents\skills\cad-translation-dev\scripts\security-audit.ps1 -ReleaseDir <bundle-path>
+#
+# This script is intentionally read-only. Fix the source or build script and
+# rebuild a bundle instead of deleting files from the bundle during the audit.
 
 param(
     [string]$ReleaseDir = "scale_release"
@@ -8,104 +12,208 @@ param(
 $ErrorActionPreference = "Stop"
 $hasErrors = $false
 
-function Write-Result($Label, $Pass, $Detail) {
+function Write-Result {
+    param(
+        [string]$Label,
+        [bool]$Pass,
+        [object]$Detail = $null
+    )
+
     $icon = if ($Pass) { "PASS" } else { "FAIL" }
     $color = if ($Pass) { "Green" } else { "Red" }
     Write-Host "[$icon] $Label" -ForegroundColor $color
-    if ($Detail) {
-        Write-Host "      $Detail" -ForegroundColor Gray
+
+    $items = @($Detail | Where-Object { $null -ne $_ -and "$($_)" -ne "" })
+    foreach ($item in $items) {
+        Write-Host "      $item" -ForegroundColor Gray
     }
 }
 
-if (-not (Test-Path $ReleaseDir)) {
+function Convert-ToRelativePath {
+    param(
+        [string]$BasePath,
+        [string]$ChildPath
+    )
+
+    $baseUri = [System.Uri]::new(($BasePath.TrimEnd('\') + '\'))
+    $childUri = [System.Uri]::new($ChildPath)
+    return [System.Uri]::UnescapeDataString(
+        $baseUri.MakeRelativeUri($childUri).ToString()
+    ).Replace('/', '\')
+}
+
+if (-not (Test-Path -LiteralPath $ReleaseDir -PathType Container)) {
     Write-Error "Release directory not found: $ReleaseDir"
     exit 1
 }
 
+$releaseRoot = (Get-Item -LiteralPath $ReleaseDir -Force).FullName.TrimEnd('\')
+$allFiles = @(Get-ChildItem -LiteralPath $releaseRoot -Recurse -Force -File)
+$allDirectories = @(Get-ChildItem -LiteralPath $releaseRoot -Recurse -Force -Directory)
+$relativeFiles = @(
+    $allFiles | ForEach-Object {
+        Convert-ToRelativePath -BasePath $releaseRoot -ChildPath $_.FullName
+    }
+)
+$relativeDirectories = @(
+    $allDirectories | ForEach-Object {
+        Convert-ToRelativePath -BasePath $releaseRoot -ChildPath $_.FullName
+    }
+)
+$allRelativePaths = @($relativeDirectories + $relativeFiles)
+
 Write-Host ""
 Write-Host "=== CAD Translation System Release Security Audit ==="
-Write-Host "Target: $ReleaseDir"
+Write-Host "Target: $releaseRoot"
 Write-Host ""
 
-# 1. Database files
-$dbFiles = Get-ChildItem -Path $ReleaseDir -Recurse -Filter "*.db" -ErrorAction SilentlyContinue
-Write-Result -Label "No .db files" -Pass ($dbFiles.Count -eq 0) -Detail ($dbFiles | ForEach-Object { $_.FullName })
-if ($dbFiles.Count -gt 0) { $hasErrors = $true }
-
-# 2. node_modules
-$hasNode = Test-Path (Join-Path $ReleaseDir "node_modules")
-Write-Result -Label "No node_modules" -Pass (-not $hasNode)
-if ($hasNode) { $hasErrors = $true }
-
-# 3. runtime_config.local.json
-$rcLocal = Get-ChildItem -Path $ReleaseDir -Recurse -Filter "runtime_config.local.json" -ErrorAction SilentlyContinue
-Write-Result -Label "No runtime_config.local.json" -Pass ($rcLocal.Count -eq 0) -Detail ($rcLocal | ForEach-Object { $_.FullName })
-if ($rcLocal.Count -gt 0) { $hasErrors = $true }
-
-# 4. .env files (excluding .env.example)
-$envFiles = Get-ChildItem -Path $ReleaseDir -Recurse -Filter ".env" -ErrorAction SilentlyContinue
-Write-Result -Label "No .env files" -Pass ($envFiles.Count -eq 0) -Detail ($envFiles | ForEach-Object { $_.FullName })
-if ($envFiles.Count -gt 0) { $hasErrors = $true }
-
-# 5. Hardcoded API keys in Python files
-$keyPatterns = @(
-    '=\s*"sk-[a-zA-Z0-9]{20,}"',
-    '=\s*"ak-[a-zA-Z0-9]{20,}"',
-    'api_key\s*[:=]\s*"[a-zA-Z0-9]{32,}"'
+# 1. Recursively reject content that is never part of the runtime bundle.
+# frontend/dist is intentionally allowed; generic dist is therefore not in
+# this list, while Python packaging leftovers (.egg-info/build) are rejected.
+$forbiddenChecks = @(
+    [PSCustomObject]@{
+        Label = "No database files"
+        Pattern = '(^|\\)[^\\]+\.(db|sqlite|sqlite3)$'
+    },
+    [PSCustomObject]@{
+        Label = "No local runtime secrets/config"
+        Pattern = '(^|\\)(runtime_config\.local\.json|local_settings\.py)$'
+    },
+    [PSCustomObject]@{
+        Label = "No non-example environment files"
+        Pattern = '(^|\\)\.env(\.(?!example$)[^\\]*)?$'
+    },
+    [PSCustomObject]@{
+        Label = "No virtual environments or dependency caches"
+        Pattern = '(^|\\)(\.venv|venv|env|node_modules|__pycache__|\.pytest_cache|\.mypy_cache|\.ruff_cache|\.tox)(\\|$)'
+    },
+    [PSCustomObject]@{
+        Label = "No packaging leftovers"
+        Pattern = '(^|\\)(build|[^\\]+\.egg-info)(\\|$)'
+    },
+    [PSCustomObject]@{
+        Label = "No generated logs or working data"
+        Pattern = '(^|\\)(log|logs|output|outputs|upload|uploads|temp|tmp)(\\|$)'
+    },
+    [PSCustomObject]@{
+        Label = "No test directories"
+        Pattern = '(^|\\)(test|tests|testing)(\\|$)'
+    },
+    [PSCustomObject]@{
+        Label = "No Python bytecode files"
+        Pattern = '(^|\\)[^\\]+\.pyc$'
+    }
 )
-$pyFiles = Get-ChildItem -Path $ReleaseDir -Recurse -Filter "*.py" -ErrorAction SilentlyContinue
+
+foreach ($check in $forbiddenChecks) {
+    $matches = @($allRelativePaths | Where-Object { $_ -match $check.Pattern })
+    Write-Result -Label $check.Label -Pass ($matches.Count -eq 0) -Detail $matches
+    if ($matches.Count -gt 0) {
+        $hasErrors = $true
+    }
+}
+
+# 2. Hardcoded API keys in text files that could be shipped or logged.
+$keyPatterns = @(
+    '(?i)\bsk-[a-zA-Z0-9]{20,}\b',
+    '(?i)\bak-[a-zA-Z0-9]{20,}\b',
+    '(?i)["'']api_key["'']\s*[:=]\s*["''][^"'']{20,}["'']'
+)
+$textExtensions = @('.py', '.json', '.md', '.bat', '.ps1', '.toml', '.ini', '.yaml', '.yml', '.txt')
 $leaks = @()
-foreach ($file in $pyFiles) {
-    $content = Get-Content $file.FullName -Raw -ErrorAction SilentlyContinue
+foreach ($file in $allFiles) {
+    if ($file.Extension.ToLowerInvariant() -notin $textExtensions) {
+        continue
+    }
+
+    $content = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+    if ($null -eq $content) {
+        continue
+    }
+
     foreach ($pattern in $keyPatterns) {
         if ($content -match $pattern) {
-            $leaks += "$($file.FullName): matched pattern"
+            $relative = Convert-ToRelativePath -BasePath $releaseRoot -ChildPath $file.FullName
+            $leaks += "${relative}: matched API-key pattern"
             break
         }
     }
 }
-Write-Result -Label "No hardcoded API keys in .py" -Pass ($leaks.Count -eq 0) -Detail $leaks
-if ($leaks.Count -gt 0) { $hasErrors = $true }
-
-# 6. Test files
-$testFiles = Get-ChildItem -Path $ReleaseDir -Recurse -Filter "test_*.py" -ErrorAction SilentlyContinue
-Write-Result -Label "No test_*.py files" -Pass ($testFiles.Count -eq 0) -Detail ($testFiles | ForEach-Object { $_.FullName })
-if ($testFiles.Count -gt 0) { $hasErrors = $true }
-
-# 7. __pycache__
-$pycaches = Get-ChildItem -Path $ReleaseDir -Recurse -Filter "__pycache__" -ErrorAction SilentlyContinue
-Write-Result -Label "No __pycache__ dirs" -Pass ($pycaches.Count -eq 0) -Detail ($pycaches | ForEach-Object { $_.FullName })
-if ($pycaches.Count -gt 0) { $hasErrors = $true }
-
-# 8. frontend/src
-$hasFrontendSrc = Test-Path (Join-Path $ReleaseDir "frontend\src")
-Write-Result -Label "No frontend/src" -Pass (-not $hasFrontendSrc)
-if ($hasFrontendSrc) { $hasErrors = $true }
-
-# 9. Electron artifacts
-$electronFiles = @("main.js", "preload.js", "package.json", "package-lock.json")
-$foundElectron = @()
-foreach ($f in $electronFiles) {
-    if (Test-Path (Join-Path $ReleaseDir $f)) {
-        $foundElectron += $f
-    }
+Write-Result -Label "No hardcoded API keys in text files" -Pass ($leaks.Count -eq 0) -Detail $leaks
+if ($leaks.Count -gt 0) {
+    $hasErrors = $true
 }
-Write-Result -Label "No Electron artifacts in root" -Pass ($foundElectron.Count -eq 0) -Detail $foundElectron
-if ($foundElectron.Count -gt 0) { $hasErrors = $true }
 
-# 10. Top-level directory check
-$expectedTop = @("backend", "docs", "frontend", "tools", "README.md", "requirements.txt", "start_delivery.bat")
-$actualTop = Get-ChildItem -Path $ReleaseDir -Directory | Select-Object -ExpandProperty Name
-$actualTop += Get-ChildItem -Path $ReleaseDir -File | Select-Object -ExpandProperty Name
-$unexpected = $actualTop | Where-Object { $_ -notin $expectedTop }
-Write-Result -Label "Top-level only expected items" -Pass ($unexpected.Count -eq 0) -Detail $unexpected
-if ($unexpected.Count -gt 0) { $hasErrors = $true }
+# 3. Source-only frontend files must not be shipped; the built dist is allowed.
+$frontendSource = @($allRelativePaths | Where-Object { $_ -match '(^|\\)frontend\\src(\\|$)' })
+Write-Result -Label "No frontend/src" -Pass ($frontendSource.Count -eq 0) -Detail $frontendSource
+if ($frontendSource.Count -gt 0) {
+    $hasErrors = $true
+}
+
+# 4. Test files can also appear outside a tests/ directory.
+$testFiles = @($relativeFiles | Where-Object {
+    $_ -match '(^|\\)(test_[^\\]*\.py|[^\\]+_test\.py|conftest\.py)$'
+})
+Write-Result -Label "No test Python files" -Pass ($testFiles.Count -eq 0) -Detail $testFiles
+if ($testFiles.Count -gt 0) {
+    $hasErrors = $true
+}
+
+# 5. Old Electron files are not part of the runtime bundle root.
+$electronRootFiles = @("main.js", "preload.js", "package.json", "package-lock.json")
+$foundElectron = @($electronRootFiles | Where-Object {
+    Test-Path -LiteralPath (Join-Path $releaseRoot $_) -PathType Leaf
+})
+Write-Result -Label "No Electron artifacts in root" -Pass ($foundElectron.Count -eq 0) -Detail $foundElectron
+if ($foundElectron.Count -gt 0) {
+    $hasErrors = $true
+}
+
+# 6. The generated bundle has a fixed top-level contract.
+$expectedTop = @(
+    "backend", "cli", "docs", "frontend", "tools",
+    "cad-cli.bat", "CLI.md", "install_cli.bat",
+    "README.md", "requirements.txt", "start_delivery.bat"
+)
+$actualTop = @(
+    Get-ChildItem -LiteralPath $releaseRoot -Force |
+        Select-Object -ExpandProperty Name
+)
+$unexpected = @($actualTop | Where-Object { $_ -notin $expectedTop })
+$missing = @($expectedTop | Where-Object { $_ -notin $actualTop })
+$topLevelProblems = @($unexpected + $missing)
+Write-Result -Label "Top-level only expected items" -Pass ($topLevelProblems.Count -eq 0) -Detail $topLevelProblems
+if ($topLevelProblems.Count -gt 0) {
+    $hasErrors = $true
+}
+
+# 7. Required runtime and CLI files must be present in every publishable bundle.
+$requiredFiles = @(
+    "backend\run_server.py",
+    "backend\app\version.py",
+    "frontend\dist\index.html",
+    "tools\libredwg\0.13.3-win64\dwg2dxf.exe",
+    "cli\cad_translate\cli.py",
+    "cli\setup.py",
+    "cad-cli.bat",
+    "install_cli.bat",
+    "CLI.md",
+    "start_delivery.bat"
+)
+$missingFiles = @($requiredFiles | Where-Object {
+    -not (Test-Path -LiteralPath (Join-Path $releaseRoot $_) -PathType Leaf)
+})
+Write-Result -Label "Required runtime and CLI files" -Pass ($missingFiles.Count -eq 0) -Detail $missingFiles
+if ($missingFiles.Count -gt 0) {
+    $hasErrors = $true
+}
 
 Write-Host ""
 if ($hasErrors) {
-    Write-Host "AUDIT FAILED — fix issues above before releasing." -ForegroundColor Red
+    Write-Host "AUDIT FAILED — fix the source/build process and rebuild before releasing." -ForegroundColor Red
     exit 1
-} else {
-    Write-Host "AUDIT PASSED — release is clean." -ForegroundColor Green
-    exit 0
 }
+
+Write-Host "AUDIT PASSED — release is clean." -ForegroundColor Green
+exit 0

@@ -1,29 +1,33 @@
 ---
-title: GUI使用规则
+title: Web、CLI 与遗留 GUI 规则
 impact: MEDIUM
-impactDescription: 图形界面操作指南
-tags: [gui, user-interface, usage]
+impactDescription: 入口说明必须指向当前维护的运行方式
+tags: [web, cli, gui, usage]
 ---
 
-## GUI使用规则
+# Web、CLI 与遗留 GUI 规则
 
-### 启动方式
+当前主入口是 Web：
 
-```bash
-python gui.py
-```
+~~~powershell
+cd backend
+python run_server.py
 
-### 操作流程
+cd frontend
+npm run dev
+~~~
 
-1. **选择文件**: 点击"选择DWG文件"或"选择文件夹"
-2. **转换DWG**: 点击"1️⃣ 转换DWG至dxf"
-3. **提取文本**: 点击"2️⃣ 提取文本"
-4. **编辑翻译**: 点击"📊 打开Excel"
-5. **应用翻译**: 点击"3️⃣ 应用翻译"
-6. **一键处理**: 点击"🚀 一键处理"完成全流程
+当前 CLI 入口是：
 
-### 配置选项
+~~~powershell
+cd agent-harness
+python -m pip install -e .
+cad-translate --help
+cad-translate doctor
+~~~
 
-- 字体选择
-- 字体大小缩放
-- 翻译模式设置
+trans_CAD_gui_V1.0/ 是遗留桌面实现；不要再使用 python gui.py、
+根目录 haochen_optimized_converter.py 或根目录 回填.py 作为当前安装说明。
+
+内网多人使用时，任务锁和唯一目录可减少覆盖冲突，但系统仍是单租户，
+没有按用户的数据隔离；ADMIN_API_TOKEN 保护的是整个实例。
