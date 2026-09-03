@@ -172,6 +172,8 @@ backend/tests/
 logs/
 output/
 .playwright-cli/
+.playwright-mcp/
+.workbuddy/
 .runtime/
 .trae/
 .ruff_cache/
