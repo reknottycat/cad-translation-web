@@ -45,11 +45,12 @@ def request(
     *,
     body: dict | None = None,
     raw: bytes | None = None,
+    auth: bool = True,
 ) -> dict:
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.cnb.api+json",
-    }
+    headers: dict = {}
+    if auth:
+        headers["Authorization"] = f"Bearer {token}"
+        headers["Accept"] = "application/vnd.cnb.api+json"
     data = None
     if body is not None:
         data = json.dumps(body).encode("utf-8")
@@ -57,7 +58,6 @@ def request(
     if raw is not None:
         data = raw
         headers["Content-Type"] = "application/octet-stream"
-        # 对齐 scripts/upload_release_asset.ps1：PUT 上传时保留 Authorization 头
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=600) as resp:
@@ -161,33 +161,21 @@ def main() -> int:
         print("WARN: no upload_url returned; upload skipped.")
         return 2
 
-    # 3. 上传文件
+    # 3. 上传文件（upload_url 是预签名地址，自带鉴权，不再附加 Authorization 头）
     print(f"uploading {asset_name} ({size} bytes) ...")
-    request("PUT", upload_url, token, raw=file_path.read_bytes())
+    request("PUT", upload_url, token, raw=file_path.read_bytes(), auth=False)
     print("upload PUT done.")
 
-    # 4. 确认上传（从 verify_url 提取 upload_token / asset_path）
-    params = dict(
-        urllib.parse.parse_qsl(urllib.parse.urlparse(verify_url or "").query)
-    )
-    upload_token = params.get("upload_token") or up.get("upload_token")
-    asset_path = params.get("asset_path") or up.get("asset_path")
-    if upload_token and asset_path:
+    # 4. 确认上传：verify_url 本身就是完整的确认地址（含 upload_token 与
+    #    URL 编码后的 asset_path），直接 POST 即可，无需手动解析拼接。
+    if verify_url:
         try:
-            request(
-                "POST",
-                f"{endpoint}/{args.repo}/-/releases/{release_id}/"
-                f"asset-upload-confirmation/"
-                f"{urllib.parse.quote(upload_token, safe='')}/"
-                f"{urllib.parse.quote(asset_path, safe='')}",
-                token,
-                body={},
-            )
+            request("POST", verify_url, token, body={})
             print("upload confirmed.")
         except ApiError as exc:
             print(f"WARN: upload confirmation failed: {exc}")
     else:
-        print("WARN: could not parse upload_token/asset_path; confirmation skipped.")
+        print("WARN: no verify_url returned; confirmation skipped.")
 
     print(f"DONE: asset '{asset_name}' attached to release '{args.tag}'.")
     return 0
