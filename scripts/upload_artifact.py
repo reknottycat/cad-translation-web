@@ -17,7 +17,7 @@ Release 不存在时跳过上传并以非零码退出（调用方可用 ``||`` �
 
 环境变量：
     CNB_TOKEN          流水线临时令牌（CI 中自动注入）
-    CNB_WEB_ENDPOINT   CNB 站点地址，默认 https://cnb.cool
+    CNB_API_ENDPOINT   CNB API 地址，默认 https://api.cnb.cool
     CNB_REPO_SLUG      当前仓库路径（如 star_fu/cad-translation-web）
 """
 
@@ -91,7 +91,8 @@ def main() -> int:
     parser.add_argument("--asset-name", default=None, help="附件名（默认取文件名）")
     parser.add_argument("--repo", default=os.environ.get("CNB_REPO_SLUG", ""))
     parser.add_argument(
-        "--endpoint", default=os.environ.get("CNB_WEB_ENDPOINT", "https://cnb.cool")
+        "--endpoint",
+        default=os.environ.get("CNB_API_ENDPOINT", "https://api.cnb.cool"),
     )
     parser.add_argument("--retries", type=int, default=6)
     parser.add_argument("--retry-interval", type=float, default=20.0)
