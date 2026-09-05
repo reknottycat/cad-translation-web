@@ -132,27 +132,40 @@ user explicitly asks for a DWG output.
 
 ## Agent bilingual translation: auto-detect keep-vs-translate
 
-When the target language is Russian and the drawing text mixes Chinese and
-English, decide per text using the recommended auto-detection logic (do not
-blindly translate every string):
+A drawing often mixes a local/native language with universal English engineering
+identifiers. When the user wants the drawing translated into a **target language
+T** (which may be Russian, English, Japanese, French, ... it is **not fixed** and
+must come from the user / the request, never be assumed), decide per text using
+the recommended auto-detection logic (do not blindly translate every string):
 
-    target = Russian
+    target = T   # user-specified, no hard-coded default
 
-    IF text is already Russian:            KEEP
-    ELIF text is Chinese:                  TRANSLATE_TO_RUSSIAN
-    ELIF text is English:
-        IF user asked to keep EN+RU bilingual:  KEEP
+    IF text is already in T:               KEEP
+    ELIF text is Chinese:                  TRANSLATE_TO_T
+    ELIF text is English (and EN != T):
+        IF user asked to keep EN + T bilingual:  KEEP
         ELSE:
             IF it is a name / model / tag /
                standard / code / unit:          KEEP
-            ELSE:                                TRANSLATE_TO_RUSSIAN
+            ELSE:                                TRANSLATE_TO_T
+    ELIF text is another language:
+        follow the user intent; when unsure default to KEEP
     ELSE:                                  KEEP
 
+Notes:
+- T is a variable driven by the user's target-language request; this logic does
+  not hard-code any particular language (e.g. do not default to Russian).
+- Chinese text is usually the drawing's native source and is translated to T.
+- English is treated as an international engineering language: it is only
+  translated to T when the user wants full English unification and it is not a
+  protected identifier; when T itself is English, English text is already the
+  target and is kept.
+
 For a mixed string such as `XV-101 Solenoid Valve`: protect the identifier
-`XV-101` (model/tag) and translate only the descriptive part
-`Solenoid Valve` → `Электромагнитный клапан`, yielding
-`XV-101 Электромагнитный клапан`. Never translate protected identifiers
-(names, model numbers, tags/位号, standards, codes, units).
+`XV-101` (model/tag) and translate only the descriptive part `Solenoid Valve`
+into the chosen T (T=Russian → `Электромагнитный клапан`, T=Chinese → `电磁阀`),
+yielding e.g. `XV-101 Электромагнитный клапан` (T=Russian). Never translate
+protected identifiers (names, model numbers, tags/位号, standards, codes, units).
 
 ## Agent standard bilingual workflow
 
@@ -161,16 +174,17 @@ DWG
 → extract all TEXT / MTEXT / ATTRIB / ATTDEF / BLOCK
 → language detection
 → build the existing term table
-→ identify Chinese-only text
-→ Chinese → Russian
+→ confirm target language T (from the user / request)
+→ identify source-language-only text to translate (Chinese, etc.)
+→ source → T
 → backfill (apply)
-→ verify Chinese residual = 0
-→ does the user require full Russian unification?
+→ verify source-language residual = 0
+→ does the user require full unification of English to T?
     ├─ no  → done
     └─ yes →
         extract English-only text
         exclude names / models / tags / standards / codes / units
-        English → Russian
+        English → T
         backfill (apply)
         classify remaining English residual
         check CAD layout
@@ -178,6 +192,9 @@ DWG
 
 This is Agent guidance for how to decide keep vs translate; the actual
 extraction/backfill steps reuse backend/app implementations as described above.
+The target language comes from the user request / API parameter and the backend
+translates into that target without assuming a preset language.
+
 
 ## Windows CAD and internal multi-user boundary
 
