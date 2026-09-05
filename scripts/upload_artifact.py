@@ -46,7 +46,10 @@ def request(
     body: dict | None = None,
     raw: bytes | None = None,
 ) -> dict:
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.cnb.api+json",
+    }
     data = None
     if body is not None:
         data = json.dumps(body).encode("utf-8")
