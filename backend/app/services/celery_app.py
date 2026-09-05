@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import socket
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict
 from urllib.parse import urlparse
 
@@ -106,9 +106,9 @@ def update_task_status(
                 task.error_message = error_message
 
             if status == "running" and not task.started_at:
-                task.started_at = datetime.utcnow()
+                task.started_at = datetime.now(timezone.utc)
             elif status in ["success", "failure"]:
-                task.completed_at = datetime.utcnow()
+                task.completed_at = datetime.now(timezone.utc)
 
             db.commit()
             logger.info("task_status_updated", task_id=task_id, status=status, progress=progress)
@@ -121,6 +121,17 @@ def update_task_status(
             db.close()
 
 
+def _reported_failure(result: Any) -> str | None:
+    """Return the durable error for a soft-failure task result."""
+    if not isinstance(result, dict) or result.get("success") is not False:
+        return None
+    return str(
+        result.get("error")
+        or result.get("message")
+        or "task returned success=false"
+    )
+
+
 @task_prerun.connect
 def task_prerun_handler(sender=None, task_id=None, task=None, args=None, kwargs=None, **kwds):
     logger.info("task_started", task_id=task_id, task_name=getattr(task, "name", None))
@@ -131,7 +142,11 @@ def task_prerun_handler(sender=None, task_id=None, task=None, args=None, kwargs=
 def task_postrun_handler(sender=None, task_id=None, task=None, args=None, kwargs=None, retval=None, state=None, **kwds):
     logger.info("task_finished", task_id=task_id, task_name=getattr(task, "name", None), state=state)
     if state == "SUCCESS":
-        update_task_status(task_id, "success", 1.0, "task completed")
+        failure = _reported_failure(retval)
+        if failure:
+            update_task_status(task_id, "failure", None, "task reported failure", failure)
+        else:
+            update_task_status(task_id, "success", 1.0, "task completed")
     elif state == "FAILURE":
         update_task_status(task_id, "failure", None, None, "task failed")
 
@@ -146,6 +161,11 @@ class CADTask(celery_app.Task):
     """Base class for CAD processing tasks."""
 
     def on_success(self, retval, task_id, args, kwargs):
+        failure = _reported_failure(retval)
+        if failure:
+            logger.error("cad_task_reported_failure", task_id=task_id, error=failure)
+            update_task_status(task_id, "failure", None, "task reported failure", failure)
+            return
         logger.info("cad_task_success", task_id=task_id)
         update_task_status(task_id, "success", 1.0, "task completed", None)
 

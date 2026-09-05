@@ -5,19 +5,26 @@ A web-based CAD drawing translation system. It extracts text from DWG/DXF drawin
 This repository contains the Web application (FastAPI backend + React frontend)
 and the maintained `cad-translate` CLI.
 
+Architecture, model configuration, performance, and Windows delivery findings:
+[2026-09-05 audit report](docs/modern/AUDIT_2026-09-05.md) (commit-scoped review).
+Current behavior and module boundaries: [architecture](docs/modern/ARCHITECTURE.md).
+Implemented fixes and validation: [remediation record](docs/modern/REMEDIATION_2026-09-05.md).
+
 ## Features
 
-- DWG/DXF conversion with multiple backends (ACadSharp, ODA, COM, LibreDWG)
+- DWG/DXF conversion through COM, ODA, LibreDWG, or native DXF processing
 - Precise MTEXT/TEXT extraction with ezdxf
 - Batch translation through 10+ LLM providers (OpenAI, DeepSeek, Qwen, Kimi, OpenRouter, and more)
-- Custom OpenAI-compatible endpoints
+- Custom provider profiles with an explicit request protocol and ordered fallback models
 - CSV/XLSX glossary auto-replacement
 - Legacy .xls glossary support (xlrd)
 - Translation cache, smart filtering, and think-tag stripping
 - Rate limiting (RPM/TPM), custom request body (extra_body), proxy control, and configurable retries
 - Replace, append, and line-break backfill modes
-- Resume failed items, partial completion state, real-time task logs
-- Provider-aware model memory
+- Resume failed items with original language/layout settings, partial completion state, real-time task logs
+- Rebuildable SQLite history index with paginated task queries
+- Persistent provider profiles and write-only credential updates
+- Bounded background CAD jobs, entity-addressed backfill, and authenticated artifact downloads
 
 ## Quick Start
 
@@ -61,7 +68,7 @@ python run_server.py
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 

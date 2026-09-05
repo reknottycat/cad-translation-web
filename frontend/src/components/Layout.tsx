@@ -4,7 +4,6 @@ import {
   HistoryIcon,
   HomeIcon,
   NotificationIcon,
-  SettingIcon,
   TranslateIcon,
   UserCircleIcon,
   ViewModuleIcon,
@@ -19,7 +18,6 @@ const navItems = [
   { to: '/cad', label: 'CAD Workspace', icon: <ViewModuleIcon /> },
   { to: '/projects', label: 'Projects', icon: <HistoryIcon /> },
   { to: '/translation', label: 'Text Tools', icon: <TranslateIcon /> },
-  { to: '/gateway', label: 'Model Config', icon: <SettingIcon /> },
 ]
 
 const pageMeta: Record<string, { title: string; description: string; badge: string }> = {
@@ -42,11 +40,6 @@ const pageMeta: Record<string, { title: string; description: string; badge: stri
     title: 'Text Tools',
     description: 'Translate text snippets or batch Excel files with the current model.',
     badge: 'Quick Utilities',
-  },
-  '/gateway': {
-    title: 'Model Config',
-    description: 'Configure provider, endpoint, credentials, and runtime tuning.',
-    badge: 'Runtime Setup',
   },
 }
 

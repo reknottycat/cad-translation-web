@@ -7,14 +7,17 @@ File Management API Routes
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from typing import List, Optional
 import structlog
 import aiofiles
 import os
+import shutil
 from pathlib import Path
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from ..database import get_db, Project, ProjectFile
 from ..config import get_settings
@@ -60,6 +63,7 @@ async def upload_files(
         ensure_directory(project_upload_dir)
         
         for file in files:
+            file_path = None
             try:
                 # 验证文件
                 validation_result = await validate_file(file, settings)
@@ -85,11 +89,13 @@ async def upload_files(
                 
                 # 计算文件哈希
                 file_hash = get_file_hash(file_path)
+                if not file_hash:
+                    raise ValueError("无法计算上传文件的内容哈希")
                 
                 # 检查文件是否已存在（基于哈希）
                 existing_file = db.query(ProjectFile).filter(
                     ProjectFile.project_id == project_id,
-                    ProjectFile.file_path.contains(file_hash[:16])  # 使用哈希前16位作为标识
+                    ProjectFile.content_hash == file_hash,
                 ).first()
                 
                 if existing_file:
@@ -111,12 +117,16 @@ async def upload_files(
                     file_path=str(file_path),
                     file_size=file_path.stat().st_size,
                     file_type=file_extension.lower().replace('.', ''),
+                    content_hash=file_hash,
                     status="uploaded"
                 )
-                
-                db.add(db_file)
-                db.flush()  # 获取ID但不提交
-                
+
+                # The database constraint closes the race between two sessions
+                # that upload identical content at the same time.
+                with db.begin_nested():
+                    db.add(db_file)
+                    db.flush()
+
                 logger.info("文件上传成功", 
                         filename=safe_original_filename,
                            file_id=db_file.id,
@@ -130,7 +140,17 @@ async def upload_files(
                     file_type=db_file.file_type
                 ))
                 
+            except IntegrityError:
+                if file_path is not None:
+                    Path(file_path).unlink(missing_ok=True)
+                uploaded_files.append(FileUploadResponse(
+                    filename=file.filename,
+                    success=False,
+                    error="文件已存在",
+                ))
             except Exception as e:
+                if file_path is not None:
+                    Path(file_path).unlink(missing_ok=True)
                 logger.error("单个文件上传失败", filename=file.filename, error=str(e))
                 uploaded_files.append(FileUploadResponse(
                     filename=file.filename,
@@ -142,7 +162,7 @@ async def upload_files(
         successful_uploads = sum(1 for f in uploaded_files if f.success)
         if successful_uploads > 0:
             project.total_files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).count()
-            project.updated_at = datetime.utcnow()
+            project.updated_at = datetime.now(timezone.utc)
         
         db.commit()
         
@@ -178,7 +198,7 @@ async def list_project_files(
         files = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).all()
         
         logger.info("项目文件列表获取成功", project_id=project_id, files_count=len(files))
-        return [FileListResponse.from_orm(file) for file in files]
+        return [FileListResponse.model_validate(file) for file in files]
         
     except HTTPException:
         raise
@@ -200,7 +220,7 @@ async def get_file_detail(
             raise HTTPException(status_code=404, detail="文件不存在")
         
         logger.info("文件详情获取成功", file_id=file_id, filename=file.original_filename)
-        return FileDetailResponse.from_orm(file)
+        return FileDetailResponse.model_validate(file)
         
     except HTTPException:
         raise
@@ -246,7 +266,7 @@ async def delete_file(
         # 更新项目文件统计
         if project:
             project.total_files = db.query(ProjectFile).filter(ProjectFile.project_id == project.id).count() - 1
-            project.updated_at = datetime.utcnow()
+            project.updated_at = datetime.now(timezone.utc)
         
         db.commit()
         
@@ -303,7 +323,7 @@ async def download_file(
             filename=download_filename,
             media_type='application/octet-stream'
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -319,6 +339,7 @@ async def create_batch_download(
     """创建批量下载包"""
     logger.info("创建批量下载包", project_id=project_id, file_type=file_type)
     
+    temp_dir = None
     try:
         # 检查项目是否存在
         project = db.query(Project).filter(Project.id == project_id).first()
@@ -371,11 +392,16 @@ async def create_batch_download(
         return FileResponse(
             path=str(zip_path),
             filename=f"project_{project_id}_{file_type}.zip",
-            media_type='application/zip'
+            media_type='application/zip',
+            background=BackgroundTask(shutil.rmtree, temp_dir, ignore_errors=True),
         )
-        
+
     except HTTPException:
+        if temp_dir is not None:
+            shutil.rmtree(temp_dir, ignore_errors=True)
         raise
     except Exception as e:
+        if temp_dir is not None:
+            shutil.rmtree(temp_dir, ignore_errors=True)
         logger.error("创建批量下载包失败", project_id=project_id, error=str(e))
         raise HTTPException(status_code=500, detail=f"创建下载包失败: {str(e)}")

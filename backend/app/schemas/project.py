@@ -5,7 +5,7 @@
 Project-related Pydantic models
 """
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from enum import Enum
@@ -30,16 +30,16 @@ class ProjectCreate(BaseModel):
     source_language: str = Field("zh", description="源语言代码")
     target_language: str = Field("en", description="目标语言代码")
     font_name: str = Field("Arial", description="字体名称")
-    font_size_reduction: float = Field(0.8, ge=0.1, le=2.0, description="字体缩放比例")
+    font_size_reduction: float = Field(2.0, ge=0, le=100, description="字号缩小量，单位与 DXF 字高一致")
     translation_mode: TranslationMode = Field(TranslationMode.ADD, description="翻译模式")
-    
-    @validator('name')
+
+    @field_validator('name')
     def validate_name(cls, v):
         if not v.strip():
             raise ValueError('项目名称不能为空')
         return v.strip()
-    
-    @validator('source_language', 'target_language')
+
+    @field_validator('source_language', 'target_language')
     def validate_language_codes(cls, v):
         # 支持的语言代码列表
         supported_languages = ['zh', 'en', 'ja', 'ko', 'fr', 'de', 'es', 'ru', 'ar']
@@ -54,10 +54,10 @@ class ProjectUpdate(BaseModel):
     source_language: Optional[str] = Field(None, description="源语言代码")
     target_language: Optional[str] = Field(None, description="目标语言代码")
     font_name: Optional[str] = Field(None, description="字体名称")
-    font_size_reduction: Optional[float] = Field(None, ge=0.1, le=2.0, description="字体缩放比例")
+    font_size_reduction: Optional[float] = Field(None, ge=0, le=100, description="字号缩小量，单位与 DXF 字高一致")
     translation_mode: Optional[TranslationMode] = Field(None, description="翻译模式")
-    
-    @validator('name')
+
+    @field_validator('name')
     def validate_name(cls, v):
         if v is not None and not v.strip():
             raise ValueError('项目名称不能为空')
@@ -78,9 +78,8 @@ class ProjectResponse(BaseModel):
     processed_files: int = 0
     created_at: datetime
     updated_at: datetime
-    
-    class Config:
-        from_attributes = True
+
+    model_config = ConfigDict(from_attributes=True)
 
 class ProjectListResponse(BaseModel):
     """项目列表响应模型"""
@@ -92,9 +91,8 @@ class ProjectListResponse(BaseModel):
     processed_files: int = 0
     created_at: datetime
     updated_at: datetime
-    
-    class Config:
-        from_attributes = True
+
+    model_config = ConfigDict(from_attributes=True)
 
 class FileInfo(BaseModel):
     """文件信息模型"""
@@ -136,19 +134,18 @@ class ProjectDetailResponse(BaseModel):
     updated_at: datetime
     files: List[Dict[str, Any]] = []
     tasks: List[Dict[str, Any]] = []
-    
-    class Config:
-        from_attributes = True
+
+    model_config = ConfigDict(from_attributes=True)
 
 class ProcessingConfig(BaseModel):
     """处理配置模型"""
     font_name: str = Field("Arial", description="字体名称")
     translation_mode: TranslationMode = Field(TranslationMode.ADD, description="翻译模式")
-    font_size_reduction: float = Field(0.8, ge=0.1, le=2.0, description="字体缩放比例")
+    font_size_reduction: float = Field(2.0, ge=0, le=100, description="字号缩小量，单位与 DXF 字高一致")
     source_language: str = Field("zh", description="源语言代码")
     target_language: str = Field("en", description="目标语言代码")
     auto_translate: bool = Field(False, description="是否自动翻译")
-    
+
 class ProjectStats(BaseModel):
     """项目统计信息模型"""
     total_projects: int = 0

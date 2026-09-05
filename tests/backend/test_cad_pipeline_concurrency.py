@@ -65,7 +65,7 @@ def test_single_dxf_pipeline_extract_only(pipeline_service, upload_files):
     assert metadata["original_filename"] == "building_a.dxf"
     assert metadata["text_count"] == 3
     assert metadata["status"] == "processing"
-    assert metadata["stage"] == "extracting"
+    assert metadata["stage"] == "extracted"
 
 
 def test_three_parallel_tasks_isolation(pipeline_service, upload_files):

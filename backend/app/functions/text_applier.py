@@ -37,6 +37,7 @@ class TextApplier:
         translation_mode: str = "replace",
         font_name: str = "Times New Roman",
         font_size_reduction: int = 2,
+        entity_translations: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """
         将翻译映射表应用到 DXF 文件，输出新 DXF。
@@ -81,13 +82,26 @@ class TextApplier:
         replace_mode = translation_mode == "replace"
         newline_mode = translation_mode == "newline"
         translated_count = 0
+        visited = set()
+        addressed = entity_translations or {}
 
         def _process_space(space):
             nonlocal translated_count
             for entity in list(space):
                 try:
-                    if self._translate_entity(space, entity, translation_map, font_name, replace_mode, font_size_reduction, doc, newline_mode):
-                        translated_count += 1
+                    entities = [entity, *getattr(entity, "attribs", [])]
+                    for target in entities:
+                        handle = str(target.dxf.handle or "")
+                        if handle and handle in visited:
+                            continue
+                        visited.add(handle)
+                        effective_map = translation_map
+                        if addressed:
+                            if handle not in addressed:
+                                continue
+                            effective_map = {str(getattr(target.dxf, "text", "")).strip(): addressed[handle]}
+                        if self._translate_entity(space, target, effective_map, font_name, replace_mode, font_size_reduction, doc, newline_mode):
+                            translated_count += 1
                 except Exception as exc:
                     logger.debug("entity_translate_failed", error=str(exc))
 
@@ -110,7 +124,7 @@ class TextApplier:
             "success": True,
             "input_file": str(dxf_path),
             "output_file": str(output_path),
-            "translation_count": len(translation_map),
+            "translation_count": len(addressed) if addressed else len(translation_map),
             "translated_entities": translated_count,
             "font_name": font_name,
             "translation_mode": translation_mode,
@@ -183,10 +197,10 @@ class TextApplier:
                 # 替换模式
                 if entity_type in ("TEXT", "ATTDEF", "ATTRIB"):
                     entity.dxf.text = translated
-                    entity.dxf.height = max(1.0, height - font_size_reduction)
+                    entity.dxf.height = max(min(1.0, height), height - max(0, font_size_reduction))
                 elif entity_type == "MTEXT":
                     entity.dxf.text = translated
-                    entity.dxf.char_height = max(1.0, height - font_size_reduction)
+                    entity.dxf.char_height = max(min(1.0, height), height - max(0, font_size_reduction))
                 self._set_font(entity, font_name, doc)
             elif newline_mode:
                 # 换行追加模式：在原文实体内部换行追加翻译
@@ -217,13 +231,13 @@ class TextApplier:
                 original = entity.dxf.text
                 # MTEXT supports \\P for paragraph/newline
                 entity.dxf.text = f"{original}\\P{translated_text}"
-                entity.dxf.char_height = max(1.0, original_height - font_size_reduction)
+                entity.dxf.char_height = max(min(1.0, original_height), original_height - max(0, font_size_reduction))
                 self._set_font(entity, font_name, doc)
             elif entity_type in ("TEXT", "ATTDEF", "ATTRIB"):
                 original = entity.dxf.text
                 # TEXT uses \\n for newline in some viewers; use MTEXT replacement for better support
                 entity.dxf.text = f"{original}\\n{translated_text}"
-                entity.dxf.height = max(1.0, original_height - font_size_reduction)
+                entity.dxf.height = max(min(1.0, original_height), original_height - max(0, font_size_reduction))
                 self._set_font(entity, font_name, doc)
         except Exception as exc:
             logger.debug("append_text_newline_failed", error=str(exc))
@@ -260,7 +274,7 @@ class TextApplier:
 
             attribs = {
                 "insert": (new_x, new_y, new_z),
-                "height": max(1.0, original_height - font_size_reduction),
+                "height": max(min(1.0, original_height), original_height - max(0, font_size_reduction)),
                 "layer": layer,
                 "rotation": rotation,
                 "color": 1,  # 红色

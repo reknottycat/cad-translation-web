@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 import structlog
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from starlette.concurrency import run_in_threadpool
 
 from app.config import get_settings
 from app.utils.file_utils import get_safe_filename, resolve_within_directory
@@ -77,7 +78,8 @@ async def upload_glossary_file(file: UploadFile = File(...)):
 @router.post("/text", response_model=TranslationResponse, dependencies=[Depends(require_admin_access)])
 async def translate_text(request: TranslationRequest):
     try:
-        translated_text = alibaba_ai_translation_service.translate_text(
+        translated_text = await run_in_threadpool(
+            alibaba_ai_translation_service.translate_text,
             text=request.text,
             source_lang=request.source_lang,
             target_lang=request.target_lang,
@@ -99,7 +101,8 @@ async def translate_batch(request: BatchTranslationRequest):
     try:
         # Upper bound is enforced by the BatchTranslationRequest Pydantic
         # schema (max_length=2000) -- no runtime check needed here.
-        translated_texts = alibaba_ai_translation_service.translate_batch(
+        translated_texts = await run_in_threadpool(
+            alibaba_ai_translation_service.translate_batch,
             texts=request.texts,
             source_lang=request.source_lang,
             target_lang=request.target_lang,
@@ -150,7 +153,8 @@ async def translate_excel_file(
         output_path = settings.get_output_path() / output_filename
 
         try:
-            stats = alibaba_ai_excel_processor.translate_excel_file(
+            stats = await run_in_threadpool(
+                alibaba_ai_excel_processor.translate_excel_file,
                 input_file_path=temp_input_path,
                 output_file_path=str(output_path),
                 text_columns=columns_list,
@@ -158,7 +162,11 @@ async def translate_excel_file(
                 target_lang=target_lang,
                 translation_mode=translation_mode,
             )
-            report_path = alibaba_ai_excel_processor.create_translation_report(stats, str(output_path))
+            report_path = await run_in_threadpool(
+                alibaba_ai_excel_processor.create_translation_report,
+                stats,
+                str(output_path),
+            )
             background_tasks.add_task(os.unlink, temp_input_path)
             return ExcelTranslationResponse(
                 success=True,
@@ -294,14 +302,26 @@ async def get_provider_presets():
 @router.post("/providers/custom", dependencies=[Depends(require_admin_access)])
 async def save_custom_provider(request: CustomProviderPayload):
     try:
-        add_custom_provider(
+        preset = await run_in_threadpool(
+            add_custom_provider,
             provider_id=request.id,
             name=request.name,
             base_url=request.base_url,
             default_model=request.default_model,
             notes=request.notes or "Custom provider",
+            api_format=request.api_format,
         )
-        return {"success": True, "message": "Custom provider added"}
+        return {
+            "success": True,
+            "message": "Custom provider added",
+            "preset": preset,
+        }
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = 409 if "already exists" in detail.lower() else 400
+        raise HTTPException(status_code=status_code, detail=detail)
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("save_custom_provider_failed", error=str(exc))
         raise HTTPException(status_code=500, detail=f"Failed to add custom provider: {exc}")
@@ -333,7 +353,15 @@ async def get_translation_config():
 @router.post("/config", dependencies=[Depends(require_admin_access)])
 async def save_translation_config(request: RuntimeConfigUpdateRequest):
     try:
-        return runtime_config_service.update_runtime_config(request.model_dump(exclude_none=False))
+        payload = request.model_dump(exclude_unset=True)
+        # A blank field means unchanged. Clearing is an explicit operation so
+        # editing a model or endpoint cannot erase a stored credential.
+        if payload.get("api_key") == "":
+            payload.pop("api_key")
+        return await run_in_threadpool(
+            runtime_config_service.update_runtime_config,
+            payload,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -345,7 +373,10 @@ async def save_translation_config(request: RuntimeConfigUpdateRequest):
 async def test_translation_connection(request: RuntimeConfigUpdateRequest):
     try:
         return RuntimeConnectionTestResponse(
-            **runtime_config_service.test_connection(request.model_dump(exclude_none=True))
+            **await run_in_threadpool(
+                runtime_config_service.test_connection,
+                request.model_dump(exclude_unset=True, exclude_none=True),
+            )
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

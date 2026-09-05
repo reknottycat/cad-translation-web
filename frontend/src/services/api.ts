@@ -2,6 +2,19 @@
 
 export const API_BASE_URL = ((import.meta as any).env?.VITE_API_BASE_URL as string) || '/api'
 export const API_ORIGIN = API_BASE_URL.replace(/\/api\/?$/, '') || ''
+const ADMIN_TOKEN_STORAGE_KEY = 'cad-translation.admin-token'
+
+export const getAdminToken = (): string => {
+  if (typeof window === 'undefined') return ''
+  return window.localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY)?.trim() || ''
+}
+
+export const setAdminToken = (token: string): void => {
+  if (typeof window === 'undefined') return
+  const normalized = token.trim()
+  if (normalized) window.localStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, normalized)
+  else window.localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY)
+}
 export const resolveApiUrl = (path: string) => {
   if (!path) return ''
   if (/^https?:\/\//i.test(path)) return path
@@ -12,6 +25,12 @@ export const resolveApiUrl = (path: string) => {
 const axiosClient = axios.create({
   baseURL: API_BASE_URL,
   timeout: 30000,
+})
+
+axiosClient.interceptors.request.use((config) => {
+  const token = getAdminToken()
+  if (token) config.headers.set('X-Admin-Token', token)
+  return config
 })
 
 const LONG_RUNNING_REQUEST = {
@@ -30,6 +49,11 @@ const api = {
   delete: <T = any>(url: string, config?: any) => axiosClient.delete<any, T>(url, config),
 }
 
+const toClientPath = (url: string) => {
+  const withoutOrigin = API_ORIGIN && url.startsWith(API_ORIGIN) ? url.slice(API_ORIGIN.length) : url
+  return withoutOrigin.replace(/^\/api(?=\/|$)/, '') || '/'
+}
+
 export const getApiErrorMessage = (error: any, fallback = 'Request failed'): string => {
   return (
     error?.response?.data?.error ||
@@ -40,6 +64,7 @@ export const getApiErrorMessage = (error: any, fallback = 'Request failed'): str
 }
 
 export const apiService = {
+  downloadBlob: (url: string): Promise<Blob> => api.get(toClientPath(url), { responseType: 'blob' }),
   health: (): Promise<any> => api.get('/health'),
 
   projects: {
@@ -55,32 +80,34 @@ export const apiService = {
         ...LONG_RUNNING_REQUEST,
         headers: { 'Content-Type': 'multipart/form-data' },
       }),
-    upload: (formData: FormData): Promise<any> =>
-      api.post('/cad/upload', formData, {
+    upload: (formData: FormData, background = true): Promise<any> => {
+      formData.set('background', String(background))
+      return api.post('/cad/upload', formData, {
         ...LONG_RUNNING_REQUEST,
         headers: { 'Content-Type': 'multipart/form-data' },
-      }),
+      })
+    },
     translateBatch: (payload: { texts: string[]; target_lang: string }): Promise<any> =>
       api.post('/cad/translate-batch', payload, LONG_RUNNING_REQUEST),
     applyTranslation: (payload: { task_id: string; translations: Array<{ original: string; translated: string }> }): Promise<any> =>
       api.post('/cad/apply-translation', payload, LONG_RUNNING_REQUEST),
-    listTasks: (): Promise<any> => api.get('/cad/tasks'),
+    listTasks: (params?: { limit?: number; offset?: number; updated_after?: number }): Promise<any> =>
+      api.get('/cad/tasks', { params }),
+    getTask: (taskId: string): Promise<any> => api.get(`/cad/tasks/${taskId}`),
     stopAllTasks: (): Promise<any> => api.post('/cad/tasks/stop-all'),
     clearAllTasks: (): Promise<any> => api.delete('/cad/tasks'),
     resumeTask: (taskId: string, payload: Record<string, unknown>): Promise<any> => api.post(`/cad/tasks/${taskId}/resume`, payload, LONG_RUNNING_REQUEST),
     getTaskLogs: (taskId: string): Promise<any> => api.get(`/cad/tasks/${taskId}/logs`),
     deleteTask: (taskId: string): Promise<any> => api.delete(`/cad/tasks/${taskId}`),
     download: async (taskId: string, fileType: 'excel' | 'cad' | 'log' | 'translated_cad') => {
-      const response = await axios.get(`${API_BASE_URL}/cad/download/${taskId}/${fileType}`, {
+      return api.get(`/cad/download/${taskId}/${fileType}`, {
         responseType: 'blob',
       })
-      return response.data
     },
     downloadPackage: async (taskIds: string[]) => {
-      const response = await axios.post(`${API_BASE_URL}/cad/download-package`, { task_ids: taskIds }, {
+      return api.post('/cad/download-package', { task_ids: taskIds }, {
         responseType: 'blob',
       })
-      return response.data
     },
   },
 

@@ -92,6 +92,16 @@ def _build_local_svc():
     return CADPipelineService()
 
 
+@pytest.fixture(autouse=True)
+def clean_task_scope():
+    # These tests assert the entire temporary task root, so legitimate tasks
+    # left by another test must not be misclassified as recreated artifacts.
+    service = _build_local_svc()
+    service.clear_all_tasks()
+    yield
+    service.clear_all_tasks()
+
+
 def _create_task(svc, label: str) -> str:
     """Create a real task via extract_upload inside the current process."""
     from fastapi import UploadFile

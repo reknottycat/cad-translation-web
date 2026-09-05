@@ -121,7 +121,7 @@ const HomePage: React.FC = () => {
           <Button theme="primary" size="large" onClick={() => navigate('/cad')}>
             Open Workspace <ArrowRightIcon className="ml-1" />
           </Button>
-          <Button variant="outline" size="large" onClick={() => navigate('/gateway')}>
+          <Button variant="outline" size="large" onClick={() => navigate('/')}>
             Model Config
           </Button>
           <Button variant="text" size="large" onClick={() => void loadDashboard()} loading={loading}>
@@ -214,7 +214,7 @@ const HomePage: React.FC = () => {
               <div className="quick-card-title">Text Tools</div>
               <div className="quick-card-text">Single-text testing and Excel batch jobs.</div>
             </button>
-            <button type="button" className="quick-card" onClick={() => navigate('/gateway')}>
+            <button type="button" className="quick-card" onClick={() => navigate('/')}>
               <div className="quick-card-title">Model Config</div>
               <div className="quick-card-text">Tune provider, endpoint, and runtime limits.</div>
             </button>

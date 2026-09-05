@@ -6,11 +6,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from app.version import __version__
+
 
 def test_clean_import_and_version(run_cli):
     code, out = run_cli("--version")
     assert "cad-translate" in out
-    assert "2.0.0" in out
+    assert __version__ in out
 
 
 def test_help_lists_expected_commands(run_cli):
@@ -23,7 +25,7 @@ def test_doctor_reports_locations(run_cli, cli_env):
     code, out = run_cli("doctor")
     assert "backend_dir" in out
     assert str(cli_env / "outputs") in out
-    assert "2.0.0" in out
+    assert __version__ in out
 
 
 def test_json_output_is_valid_json(run_cli, sample_dxf):

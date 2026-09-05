@@ -7,6 +7,8 @@ Translation Related Celery Tasks
 
 import os
 import time
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 import structlog
@@ -17,6 +19,18 @@ from app.config import get_settings
 
 logger = structlog.get_logger()
 settings = get_settings()
+
+
+def _run_async(coroutine):
+    """Run an async compatibility facade from a synchronous Celery task."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coroutine)
+    # Direct eager/test invocation can occur on a thread that already owns an
+    # event loop. Run the coroutine on a dedicated thread in that case.
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(asyncio.run, coroutine).result()
 
 @celery_app.task(bind=True, name="translate_excel_task")
 def translate_excel_task(
@@ -269,6 +283,17 @@ def cad_file_translate_task(
         processor = CADProcessor()
         total_files = len(file_paths)
         processed_files = []
+
+        if total_files == 0:
+            return {
+                'success': True,
+                'message': 'CAD文件翻译任务完成',
+                'project_id': project_id,
+                'total_files': 0,
+                'successful_files': 0,
+                'failed_files': 0,
+                'processed_files': [],
+            }
         
         for i, file_path in enumerate(file_paths):
             # 更新进度
@@ -284,10 +309,21 @@ def cad_file_translate_task(
             
             try:
                 # 处理单个CAD文件
-                result = processor.process_cad_file(
-                    file_path=file_path,
-                    project_id=project_id,
-                    **translation_config
+                result = _run_async(processor.process_cad_file(
+                    input_file=file_path,
+                    auto_translate=bool(translation_config.get('auto_translate', True)),
+                    target_language=str(
+                        translation_config.get('target_language')
+                        or translation_config.get('target_lang')
+                        or 'en'
+                    ),
+                    converter_backend=translation_config.get('converter_backend'),
+                    translation_mode=str(translation_config.get('translation_mode') or 'replace'),
+                    font_name=translation_config.get('font_name'),
+                    font_size_reduction=float(
+                        translation_config.get('font_size_reduction') or 2.0
+                    ),
+                )
                 )
                 
                 processed_files.append({

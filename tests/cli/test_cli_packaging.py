@@ -390,13 +390,15 @@ def _stage_dirty_release_workspace(tmp_path):
     root = tmp_path / "probe"
     (root / "backend").mkdir(parents=True)
     # Real runtime sources the package must keep.
-    shutil.copytree(REPO / "backend", root / "backend", dirs_exist_ok=True)
+    shutil.copytree(REPO / "backend", root / "backend", dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns(".venv", "__pycache__", ".pytest_cache", "*.log"))
     shutil.copytree(REPO / "agent-harness", root / "agent-harness", dirs_exist_ok=True)
     if (REPO / "docs" / "modern").exists():
         shutil.copytree(REPO / "docs" / "modern", root / "docs" / "modern", dirs_exist_ok=True)
     shutil.copy2(REPO / "requirements.txt", root / "requirements.txt")
     (root / "scripts").mkdir(parents=True, exist_ok=True)
     shutil.copy2(BUILD_SCRIPT, root / "scripts" / "build_scale.ps1")
+    shutil.copy2(REPO / "scripts/release_manifest.py", root / "scripts/release_manifest.py")
     # frontend/dist + tools are runtime pieces required by the build (skipped in CI).
     dist = root / "frontend" / "dist"
     dist.mkdir(parents=True)
@@ -508,18 +510,18 @@ def test_real_powershell_build_secret_guard_is_fail_closed(tmp_path):
     the last line of defence: if an exclusion rule ever lets a secret reach the
     staging dir, the build must abort with a non-zero exit code and refuse to
     write a package -- never silently ship a .env / runtime_config.local.json.
-    Here we deliberately strip the secret exclusions from a scratch copy of the
-    build script so a secret WOULD be copied; the guard must then abort."""
+    Here we deliberately inject a secret into staging immediately before the
+    guard runs; the build must abort before writing the ZIP."""
 
     root = _stage_dirty_release_workspace(tmp_path)
-    # Scratch copy of the script with the secret exclusions removed so the
-    # secret files would otherwise make it into the staging dir.
+    # Inject a synthetic secret after assembly to exercise the final gate.
     scratch = root / "scripts" / "build_no_secret_excl.ps1"
     script_text = (root / "scripts" / "build_scale.ps1").read_text(encoding="utf-8")
     script_text = script_text.replace(
-        "    '(^|/)\\.env$',\n    '(^|/)\\.env\\.(?!example$)',\n"
-        "    '(^|/)runtime_config\\.local\\.json$',",
-        "",
+        "$secretFiles = Get-ChildItem",
+        'Copy-Item -LiteralPath (Join-Path $rootPath "backend/.env") '
+        '-Destination (Join-Path $outDir "backend/.env") -Force\n'
+        "$secretFiles = Get-ChildItem",
     )
     scratch.write_text(script_text, encoding="utf-8")
 

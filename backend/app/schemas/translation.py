@@ -5,7 +5,7 @@
 Translation Related Data Models
 """
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
@@ -176,6 +176,10 @@ class RuntimeConfigUpdateRequest(BaseModel):
     format: Optional[str] = Field(None, description="API format such as openai_compatible/anthropic/google/ollama/lmstudio")
     base_url: Optional[str] = Field(None, description="OpenAI-compatible endpoint base url")
     api_key: Optional[str] = Field(None, description="API key for the selected provider")
+    clear_api_key: bool = Field(
+        False,
+        description="Explicitly remove the stored key for the selected provider",
+    )
     model: Optional[str] = Field(None, description="Active model id")
     system_prompt_mode: Optional[str] = Field(None, description="default/cad_specialized/custom")
     custom_system_prompt: Optional[str] = Field(None, description="Full custom system prompt when custom mode is selected")
@@ -201,20 +205,40 @@ class RuntimeConfigUpdateRequest(BaseModel):
     system_prompt: Optional[str] = Field(None, description="System prompt text")
     allow_demo_fallback: Optional[bool] = Field(None, description="Allow demo fallback when API key is missing")
     provider_api_keys: Optional[Dict[str, str]] = Field(
-        None, description="Provider-specific API keys map"
+        None,
+        description="Deprecated provider-specific key updates; use api_key/clear_api_key",
+    )
+    provider_profiles: Optional[Dict[str, Dict[str, Any]]] = Field(
+        None,
+        description="Non-secret endpoint/model settings keyed by provider id",
     )
     fallback_models: Optional[List[Dict[str, Any]]] = Field(
         None,
         description="Optional ordered fallback model configs checked before use",
     )
 
+    @model_validator(mode="after")
+    def validate_api_key_operation(self):
+        if self.clear_api_key and self.api_key not in (None, ""):
+            raise ValueError("api_key and clear_api_key cannot be used together")
+        return self
+
 
 class CustomProviderPayload(BaseModel):
     """Payload for adding a custom translation provider preset."""
-    id: str = Field(..., description="Unique provider ID (e.g., 'my-custom-endpoint')")
+    model_config = ConfigDict(extra="forbid")
+
+    id: Optional[str] = Field(
+        None,
+        description="Optional stable provider ID; the server generates one when omitted",
+    )
     name: str = Field(..., description="Display name for the provider")
     base_url: str = Field(..., description="The base URL of the OpenAI-compatible API")
     default_model: str = Field(..., description="The default model to use")
+    api_format: str = Field(
+        "openai_compatible",
+        description="openai_compatible/anthropic/google/ollama/lmstudio",
+    )
     notes: Optional[str] = Field("Custom provider", description="Optional notes for display")
 
 

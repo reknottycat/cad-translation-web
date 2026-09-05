@@ -10,10 +10,16 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 from typing import List, Optional
 import structlog
-from datetime import datetime
+from datetime import datetime, timezone
+from pathlib import Path
+import shutil
+import uuid
 
 from ..config import get_settings
-from ..database import get_db, Project, ProjectFile, ProcessingTask
+from ..database import (
+    get_db, Project, ProjectFile, ProcessingTask, TextExtraction,
+    TranslationCache,
+)
 from ..schemas.project import (
     ProjectCreate, ProjectUpdate, ProjectResponse, 
     ProjectListResponse, ProjectDetailResponse
@@ -21,10 +27,52 @@ from ..schemas.project import (
 from ..services.tasks.cad_tasks import process_project_batch_task
 from ..services.cad_pipeline_service import cad_pipeline_service
 from ..security import require_admin_access
+from ..utils.file_utils import resolve_within_directory
 
 logger = structlog.get_logger(__name__)
 router = APIRouter()
 settings = get_settings()
+
+
+def _remove_project_artifacts(project_id: int, files: list[ProjectFile]) -> list[str]:
+    """Remove only paths contained by configured upload/output roots."""
+    roots = [settings.get_upload_path(), settings.get_output_path()]
+    failures: list[str] = []
+    candidates = {
+        str(value)
+        for file in files
+        for value in (
+            file.file_path,
+            file.converted_path,
+            file.excel_path,
+            file.translated_path,
+        )
+        if value
+    }
+    for raw_path in candidates:
+        allowed = None
+        for root in roots:
+            try:
+                allowed = resolve_within_directory(root, raw_path)
+                break
+            except ValueError:
+                continue
+        if allowed is None:
+            failures.append(f"拒绝删除允许目录之外的文件: {raw_path}")
+            continue
+        try:
+            allowed.unlink(missing_ok=True)
+        except OSError as exc:
+            failures.append(f"删除文件失败 {allowed}: {exc}")
+    project_upload = resolve_within_directory(
+        settings.get_upload_path(), f"project_{project_id}"
+    )
+    try:
+        if project_upload.exists():
+            shutil.rmtree(project_upload)
+    except OSError as exc:
+        failures.append(f"删除项目上传目录失败 {project_upload}: {exc}")
+    return failures
 
 @router.get("/summary", dependencies=[Depends(require_admin_access)])
 async def get_projects_summary(db: Session = Depends(get_db)):
@@ -47,8 +95,14 @@ async def get_projects_summary(db: Session = Depends(get_db)):
             .all()
         )
 
-        total_files = db.query(func.coalesce(func.sum(Project.total_files), 0)).scalar() or 0
-        processed_files = db.query(func.coalesce(func.sum(Project.processed_files), 0)).scalar() or 0
+        total_projects = db.query(func.count(Project.id)).scalar() or 0
+        total_files = db.query(func.count(ProjectFile.id)).scalar() or 0
+        processed_files = (
+            db.query(func.count(ProjectFile.id))
+            .filter(ProjectFile.status.notin_(["uploaded", "failed"]))
+            .scalar()
+            or 0
+        )
         total_texts = db.query(func.coalesce(func.sum(Project.total_texts), 0)).scalar() or 0
         translated_texts = db.query(func.coalesce(func.sum(Project.translated_texts), 0)).scalar() or 0
         failed_tasks = (
@@ -75,13 +129,10 @@ async def get_projects_summary(db: Session = Depends(get_db)):
             }
 
         counts = {
-            "total_projects": status_counts.get("created", 0)
-            + status_counts.get("processing", 0)
-            + status_counts.get("completed", 0)
-            + status_counts.get("failed", 0)
-            + status_counts.get("cancelled", 0),
+            "total_projects": int(total_projects),
             "active_projects": status_counts.get("processing", 0),
-            "completed_projects": status_counts.get("completed", 0),
+            "completed_projects": status_counts.get("completed", 0)
+            + status_counts.get("partially_completed", 0),
             "failed_projects": status_counts.get("failed", 0) + status_counts.get("cancelled", 0),
             "total_files": int(total_files),
             "processed_files": int(processed_files),
@@ -115,43 +166,82 @@ async def get_projects_summary(db: Session = Depends(get_db)):
             for task, project_name in recent_task_rows
         ]
 
-        # CAD Workspace currently persists most runtime task state on disk.
-        # When the SQL tables are empty, derive dashboard/project summaries from task artifacts.
-        if counts["total_projects"] == 0 and not recent_tasks_payload:
-            artifact_tasks = cad_pipeline_service.list_tasks()
-            counts["total_projects"] = len(artifact_tasks)
-            counts["active_projects"] = sum(
-                1 for task in artifact_tasks if not task.get("files", {}).get("translated_cad_file") and not task.get("extract_only")
+        # SQL projects and canonical filesystem tasks are independent live
+        # stores. Include both on every request and report their persisted
+        # status instead of hiding one whenever the other is non-empty.
+        artifact_tasks = cad_pipeline_service.list_tasks()
+        artifact_status_counts: dict[str, int] = {}
+        artifact_payload = []
+        for task in artifact_tasks:
+            status = str(task.get("status") or "queued").lower()
+            artifact_status_counts[status] = artifact_status_counts.get(status, 0) + 1
+            total_chunks = int(task.get("total_chunks") or 0)
+            completed_chunks = int(task.get("completed_chunks") or 0)
+            progress = (
+                min(100.0, completed_chunks * 100.0 / total_chunks)
+                if total_chunks
+                else (100.0 if status in {"done", "partial"} else 0.0)
             )
-            counts["completed_projects"] = sum(
-                1 for task in artifact_tasks if task.get("files", {}).get("translated_cad_file")
-            )
-            counts["failed_projects"] = 0
-            counts["total_files"] = len(artifact_tasks)
-            counts["processed_files"] = counts["completed_projects"]
-            counts["total_texts"] = sum(int(task.get("text_count") or 0) for task in artifact_tasks)
-            counts["translated_texts"] = sum(int(task.get("translation_count") or 0) for task in artifact_tasks)
-            recent_tasks_payload = [
+            updated_timestamp = task.get("last_activity_at") or task.get("created_at")
+            artifact_payload.append(
                 {
                     "task_id": task.get("task_id"),
                     "project_id": None,
                     "project_name": task.get("original_filename"),
                     "task_type": "cad_pipeline",
-                    "status": "completed" if task.get("files", {}).get("translated_cad_file") else "processing",
-                    "progress": 100 if task.get("files", {}).get("translated_cad_file") else 68,
-                    "message": f"{int(task.get('translation_count') or 0)} translated / {int(task.get('text_count') or 0)} extracted",
-                    "updated_at": None,
+                    "status": status,
+                    "progress": progress,
+                    "message": (
+                        f"stage={task.get('stage') or 'queued'}; "
+                        f"{int(task.get('translation_count') or 0)} translated / "
+                        f"{int(task.get('text_count') or 0)} extracted"
+                    ),
+                    "updated_at": (
+                        datetime.fromtimestamp(float(updated_timestamp)).isoformat()
+                        if updated_timestamp
+                        else None
+                    ),
                 }
-                for task in artifact_tasks[:10]
-            ]
+            )
+
+        active_artifacts = sum(
+            artifact_status_counts.get(status, 0)
+            for status in ("queued", "processing")
+        )
+        completed_artifacts = sum(
+            artifact_status_counts.get(status, 0) for status in ("done", "partial")
+        )
+        failed_artifacts = sum(
+            artifact_status_counts.get(status, 0) for status in ("error", "cancelled")
+        )
+        counts["total_projects"] += len(artifact_tasks)
+        counts["active_projects"] += active_artifacts
+        counts["completed_projects"] += completed_artifacts
+        counts["failed_projects"] += failed_artifacts
+        counts["total_files"] += len(artifact_tasks)
+        counts["processed_files"] += completed_artifacts
+        counts["total_texts"] += sum(
+            int(task.get("text_count") or 0) for task in artifact_tasks
+        )
+        counts["translated_texts"] += sum(
+            int(task.get("translation_count") or 0) for task in artifact_tasks
+        )
+        recent_tasks_payload = sorted(
+            [*recent_tasks_payload, *artifact_payload],
+            key=lambda item: item.get("updated_at") or "",
+            reverse=True,
+        )[:10]
 
         return {
             "counts": counts,
             "status_breakdown": status_counts,
             "alerts": {
-                "failed_tasks": int(failed_tasks),
-                "recoverable_tasks": int(recoverable_tasks),
+                "failed_tasks": int(failed_tasks) + failed_artifacts,
+                "recoverable_tasks": int(recoverable_tasks)
+                + artifact_status_counts.get("error", 0)
+                + artifact_status_counts.get("partial", 0),
             },
+            "artifact_status_breakdown": artifact_status_counts,
             "recent_projects": recent_projects_payload,
             "recent_tasks": recent_tasks_payload,
             "last_release": release_info,
@@ -185,7 +275,7 @@ async def create_project(
         db.refresh(db_project)
         
         logger.info("项目创建成功", project_id=db_project.id, name=project.name)
-        return ProjectResponse.from_orm(db_project)
+        return ProjectResponse.model_validate(db_project)
         
     except Exception as e:
         logger.error("创建项目失败", error=str(e))
@@ -211,7 +301,7 @@ async def list_projects(
         projects = query.offset(skip).limit(limit).all()
         
         logger.info("项目列表获取成功", count=len(projects))
-        return [ProjectListResponse.from_orm(project) for project in projects]
+        return [ProjectListResponse.model_validate(project) for project in projects]
         
     except Exception as e:
         logger.error("获取项目列表失败", error=str(e))
@@ -265,17 +355,17 @@ async def update_project(
             raise HTTPException(status_code=404, detail="项目不存在")
         
         # 更新项目字段
-        update_data = project_update.dict(exclude_unset=True)
+        update_data = project_update.model_dump(exclude_unset=True)
         for field, value in update_data.items():
             setattr(project, field, value)
         
-        project.updated_at = datetime.utcnow()
+        project.updated_at = datetime.now(timezone.utc)
         
         db.commit()
         db.refresh(project)
         
         logger.info("项目信息更新成功", project_id=project_id)
-        return ProjectResponse.from_orm(project)
+        return ProjectResponse.model_validate(project)
         
     except HTTPException:
         raise
@@ -292,6 +382,8 @@ async def clear_all_data(db: Session = Depends(get_db)):
     try:
         # 删除所有处理任务
         db.query(ProcessingTask).delete()
+        db.query(TextExtraction).delete()
+        db.query(TranslationCache).delete()
         # 删除所有项目文件
         db.query(ProjectFile).delete()
         # 删除所有项目
@@ -325,12 +417,23 @@ async def delete_project(
         if not project:
             raise HTTPException(status_code=404, detail="项目不存在")
         
-        # 删除项目（级联删除相关文件和任务）
+        project_files = list(project.files)
+        # 先提交级联数据库删除，再受控清理本项目拥有的文件。
+        db.query(TextExtraction).filter(
+            TextExtraction.project_id == project_id
+        ).delete(synchronize_session=False)
         db.delete(project)
         db.commit()
+        cleanup_failures = _remove_project_artifacts(project_id, project_files)
+        for failure in cleanup_failures:
+            logger.warning("project_artifact_cleanup_failed", detail=failure)
         
         logger.info("项目删除成功", project_id=project_id)
-        return {"message": "项目删除成功"}
+        return {
+            "message": "项目删除成功",
+            "cleanup_complete": not cleanup_failures,
+            "cleanup_errors": cleanup_failures,
+        }
         
     except HTTPException:
         raise
@@ -352,10 +455,6 @@ async def start_project_processing(
         if not project:
             raise HTTPException(status_code=404, detail="项目不存在")
         
-        # 检查项目状态
-        if project.status == "processing":
-            raise HTTPException(status_code=400, detail="项目正在处理中")
-        
         # 检查是否有文件
         files_count = db.query(ProjectFile).filter(ProjectFile.project_id == project_id).count()
         if files_count == 0:
@@ -371,31 +470,70 @@ async def start_project_processing(
             "auto_translate": False  # 第一阶段暂不支持自动翻译
         }
         
-        # 启动批量处理任务
-        task = process_project_batch_task.delay(project_id, config)
-        
-        # 创建任务记录
+        task_id = uuid.uuid4().hex
+        # Claim the project in the database before dispatch. The conditional
+        # update serializes concurrent start requests across API workers.
+        claimed = (
+            db.query(Project)
+            .filter(Project.id == project_id, Project.status != "processing")
+            .update(
+                {
+                    Project.status: "processing",
+                    Project.updated_at: datetime.now(timezone.utc),
+                },
+                synchronize_session=False,
+            )
+        )
+        if claimed != 1:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="项目已有正在执行的任务")
+
+        # Persist the durable task row before eager or remote workers can emit
+        # lifecycle signals for this exact task id.
         db_task = ProcessingTask(
             project_id=project_id,
-            task_id=task.id,
+            task_id=task_id,
             task_type="batch_process",
             status="pending",
-            message="批量处理任务已启动"
+            message="批量处理任务等待执行"
         )
         db.add(db_task)
-        
-        # 更新项目状态
-        project.status = "processing"
-        project.updated_at = datetime.utcnow()
-        
         db.commit()
-        
-        logger.info("项目批量处理任务启动成功", project_id=project_id, task_id=task.id)
-        
+
+        try:
+            process_project_batch_task.apply_async(
+                args=(project_id, config), task_id=task_id
+            )
+        except Exception as exc:
+            db.rollback()
+            failed_task = db.query(ProcessingTask).filter(
+                ProcessingTask.task_id == task_id
+            ).first()
+            failed_project = db.query(Project).filter(Project.id == project_id).first()
+            if failed_task:
+                failed_task.status = "failure"
+                failed_task.message = "任务派发失败"
+                failed_task.error_message = str(exc)
+                failed_task.completed_at = datetime.now(timezone.utc)
+            if failed_project:
+                failed_project.status = "failed"
+            db.commit()
+            raise HTTPException(status_code=503, detail=f"任务派发失败: {exc}") from exc
+
+        db.expire_all()
+        effective_project = db.query(Project).filter(Project.id == project_id).first()
+        effective_task = db.query(ProcessingTask).filter(
+            ProcessingTask.task_id == task_id
+        ).first()
+        project_status = effective_project.status if effective_project else "failed"
+        task_status = effective_task.status if effective_task else "failure"
+        logger.info("项目批量处理任务启动成功", project_id=project_id, task_id=task_id)
+
         return {
-            "message": "批量处理任务已启动",
-            "task_id": task.id,
-            "project_status": "processing"
+            "message": "批量处理任务已提交",
+            "task_id": task_id,
+            "task_status": task_status,
+            "project_status": project_status,
         }
         
     except HTTPException:
@@ -491,14 +629,14 @@ async def cancel_project_processing(
                 celery_app.control.revoke(task.task_id, terminate=True)
                 task.status = "revoked"
                 task.message = "任务已被用户取消"
-                task.completed_at = datetime.utcnow()
+                task.completed_at = datetime.now(timezone.utc)
                 cancelled_count += 1
             except Exception as e:
                 logger.warning("取消任务失败", task_id=task.task_id, error=str(e))
         
         # 更新项目状态
         project.status = "cancelled"
-        project.updated_at = datetime.utcnow()
+        project.updated_at = datetime.now(timezone.utc)
         
         db.commit()
         

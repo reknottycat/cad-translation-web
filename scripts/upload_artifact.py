@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""把构建产物上传为 CNB Release 附件（尽力而为，脚本源管理器版本的移植）。
+"""把构建产物上传为 CNB Release 附件；任何上传或确认失败均返回非零码。
 
 与 scripts/upload_release_asset.ps1 的流程一致，适用于 Linux 流水线容器：
 
@@ -9,8 +9,7 @@
     3. PUT  upload_url（流式上传文件内容）
     4. POST /{repo}/-/releases/{id}/asset-upload-confirmation/{token}/{path}
 
-Release 不存在时跳过上传并以非零码退出（调用方可用 ``||`` 兜底），
-不会抛出未捕获异常导致流水线失败。
+Release 不存在、令牌缺失或服务端确认失败时阻塞发布，调用方必须检查退出码。
 
 用法：
     python scripts/upload_artifact.py --tag v1.0.0 --file xxx.zip
@@ -38,6 +37,12 @@ class ApiError(RuntimeError):
     pass
 
 
+def safe_url(url: str) -> str:
+    """Keep query tokens and credentials out of diagnostics."""
+    parsed = urllib.parse.urlsplit(url)
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.hostname or "", "/[redacted]", "", ""))
+
+
 def request(
     method: str,
     url: str,
@@ -63,8 +68,10 @@ def request(
         with urllib.request.urlopen(req, timeout=600) as resp:
             payload = resp.read()
     except urllib.error.HTTPError as exc:
-        detail = exc.read()[:500]
-        raise ApiError(f"HTTP {exc.code} on {method} {url}: {detail!r}") from exc
+        exc.read(500)
+        raise ApiError(
+            f"HTTP {exc.code} on {method} {safe_url(url)}: response omitted"
+        ) from exc
     text = payload.decode("utf-8", "replace").strip()
     if not text:
         return {}
@@ -101,7 +108,7 @@ def main() -> int:
     token = os.environ.get("CNB_TOKEN", "")
     file_path = Path(args.file)
     if not token:
-        print("WARN: CNB_TOKEN not set; skip upload.")
+        print("ERROR: CNB_TOKEN not set; provide a release token and retry.")
         return 2
     if not file_path.is_file():
         print(f"ERROR: file not found: {file_path}")
@@ -136,7 +143,7 @@ def main() -> int:
             time.sleep(args.retry_interval)
 
     if not release:
-        print(f"WARN: Release for tag '{args.tag}' not found; upload skipped.")
+        print(f"ERROR: Release for tag '{args.tag}' was not found after retries.")
         return 2
 
     release_id = release.get("id") or release.get("release_id")
@@ -158,7 +165,7 @@ def main() -> int:
     )
     verify_url = up.get("verify_url") or resp.get("verify_url")
     if not upload_url:
-        print("WARN: no upload_url returned; upload skipped.")
+        print("ERROR: release API returned no upload URL.")
         return 2
 
     # 3. 上传文件（upload_url 是预签名地址，自带鉴权，不再附加 Authorization 头）
@@ -168,14 +175,15 @@ def main() -> int:
 
     # 4. 确认上传：verify_url 本身就是完整的确认地址（含 upload_token 与
     #    URL 编码后的 asset_path），直接 POST 即可，无需手动解析拼接。
-    if verify_url:
-        try:
-            request("POST", verify_url, token, body={})
-            print("upload confirmed.")
-        except ApiError as exc:
-            print(f"WARN: upload confirmation failed: {exc}")
-    else:
-        print("WARN: no verify_url returned; confirmation skipped.")
+    if not verify_url:
+        print("ERROR: release API returned no upload confirmation URL.")
+        return 1
+    try:
+        request("POST", verify_url, token, body={})
+        print("upload confirmed.")
+    except ApiError as exc:
+        print(f"ERROR: upload confirmation failed: {exc}")
+        return 1
 
     print(f"DONE: asset '{asset_name}' attached to release '{args.tag}'.")
     return 0

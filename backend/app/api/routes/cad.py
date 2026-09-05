@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
+from starlette.background import BackgroundTask
 
 from app.config import get_settings
 from app.services.alibaba_ai_translation_service import alibaba_ai_translation_service
 from app.services.runtime_config_service import runtime_config_service
 from app.services.cad_pipeline_service import TaskCancelledError, cad_pipeline_service, validate_task_id
+from app.services.cad_task_jobs import TaskBusyError
 from app.utils.file_utils import validate_file
 from app.security import require_admin_access
 
@@ -115,7 +117,7 @@ async def apply_translation_to_cad(request: dict):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except TaskCancelledError as exc:
+    except (TaskCancelledError, TaskBusyError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Apply translation failed: {exc}") from exc
@@ -130,9 +132,18 @@ async def upload_cad_file(
     translation_mode: str = Form(default="replace"),
     font_name: str | None = Form(default=None),
     font_size_reduction: int = Form(default=2),
+    background: bool = Form(default=False),
 ):
     try:
         await _validate_uploaded_cad_file(file)
+        if background:
+            result = await run_in_threadpool(
+                cad_pipeline_service.submit_upload, uploaded_file=file,
+                target_language=target_language, converter_backend=converter_backend,
+                extract_only=extract_only, translation_mode=translation_mode,
+                font_name=font_name, font_size_reduction=font_size_reduction,
+            )
+            return JSONResponse({"success": True, "data": result}, status_code=202)
         result = await run_in_threadpool(
             cad_pipeline_service.process_upload,
             uploaded_file=file,
@@ -160,7 +171,7 @@ async def upload_cad_file(
         raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except TaskCancelledError as exc:
+    except (TaskCancelledError, TaskBusyError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"CAD upload failed: {exc}") from exc
@@ -170,8 +181,10 @@ async def upload_cad_file(
 async def download_file(task_id: str, file_type: str):
     try:
         task_id = validate_task_id(task_id)
-        file_path, media_type = cad_pipeline_service.resolve_download(task_id, file_type)
-        return FileResponse(path=str(file_path), media_type=media_type, filename=file_path.name)
+        file_path, media_type, download_name = await run_in_threadpool(
+            cad_pipeline_service.snapshot_download, task_id, file_type)
+        return FileResponse(path=str(file_path), media_type=media_type, filename=download_name,
+                            background=BackgroundTask(file_path.unlink, missing_ok=True))
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -186,8 +199,9 @@ async def download_package(request: dict):
     try:
         for _tid in (task_ids or []):
             validate_task_id(_tid)
-        file_path, media_type = cad_pipeline_service.build_download_package(task_ids)
-        return FileResponse(path=str(file_path), media_type=media_type, filename=file_path.name)
+        file_path, media_type = await run_in_threadpool(cad_pipeline_service.build_download_package, task_ids)
+        return FileResponse(path=str(file_path), media_type=media_type, filename=file_path.name,
+                            background=BackgroundTask(file_path.unlink, missing_ok=True))
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -197,9 +211,12 @@ async def download_package(request: dict):
 
 
 @router.get("/tasks", dependencies=[Depends(require_admin_access)])
-async def list_tasks():
+async def list_tasks(limit: int = Query(default=100, ge=1, le=1000),
+                     offset: int = Query(default=0, ge=0),
+                     updated_after: float | None = Query(default=None, ge=0)):
     try:
-        return JSONResponse({"success": True, "data": cad_pipeline_service.list_tasks()})
+        page = await run_in_threadpool(cad_pipeline_service.task_page, limit, offset, updated_after)
+        return JSONResponse({"success": True, **page})
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"List tasks failed: {exc}") from exc
 
@@ -207,8 +224,8 @@ async def list_tasks():
 @router.post("/tasks/stop-all", dependencies=[Depends(require_admin_access)])
 async def stop_all_tasks():
     try:
-        result = cad_pipeline_service.stop_all_tasks()
-        return JSONResponse({"success": True, "message": "all active tasks stopped", "data": result})
+        result = await run_in_threadpool(cad_pipeline_service.stop_all_tasks)
+        return JSONResponse({"success": True, "message": "cancellation requested for active tasks", "data": result})
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Stop tasks failed: {exc}") from exc
 
@@ -216,7 +233,7 @@ async def stop_all_tasks():
 @router.delete("/tasks", dependencies=[Depends(require_admin_access)])
 async def clear_all_tasks():
     try:
-        cad_pipeline_service.clear_all_tasks()
+        await run_in_threadpool(cad_pipeline_service.clear_all_tasks)
         return JSONResponse({"success": True, "message": "all tasks cleared"})
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Clear tasks failed: {exc}") from exc
@@ -227,23 +244,41 @@ async def resume_task(task_id: str, request: dict):
     """Resume an interrupted or failed CAD task from its last checkpoint."""
     try:
         task_id = validate_task_id(task_id)
+        if request.get("background"):
+            result = await run_in_threadpool(cad_pipeline_service.submit_resume,
+                task_id=task_id, target_language=request.get("target_language"),
+                translation_mode=request.get("translation_mode"),
+                font_name=request.get("font_name"), font_size_reduction=(int(request["font_size_reduction"]) if request.get("font_size_reduction") is not None else None))
+            return JSONResponse({"success": True, "data": result}, status_code=202)
         result = await run_in_threadpool(
             cad_pipeline_service.resume_task,
             task_id=task_id,
-            target_language=request.get("target_language", "en"),
-            translation_mode=request.get("translation_mode", "replace"),
+            target_language=request.get("target_language"),
+            translation_mode=request.get("translation_mode"),
             font_name=request.get("font_name"),
-            font_size_reduction=int(request.get("font_size_reduction", 2)),
+            font_size_reduction=(int(request["font_size_reduction"]) if request.get("font_size_reduction") is not None else None),
         )
         return JSONResponse({"success": True, "data": result})
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except TaskCancelledError as exc:
+    except (TaskCancelledError, TaskBusyError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Resume task failed: {exc}") from exc
+
+
+@router.get("/tasks/{task_id}", dependencies=[Depends(require_admin_access)])
+def get_task(task_id: str):
+    try:
+        task_id = validate_task_id(task_id)
+        return {"success": True, "data": cad_pipeline_service._build_task_summary(
+            cad_pipeline_service._load_task(task_id))}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/tasks/{task_id}/logs", dependencies=[Depends(require_admin_access)])
@@ -265,7 +300,7 @@ async def get_task_logs(task_id: str):
 async def delete_task(task_id: str):
     try:
         task_id = validate_task_id(task_id)
-        cad_pipeline_service.delete_task(task_id)
+        await run_in_threadpool(cad_pipeline_service.delete_task, task_id)
         return JSONResponse({"success": True, "message": f"task {task_id} deleted"})
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

@@ -23,11 +23,13 @@ Design notes:
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import tempfile
 import threading
 import time
+import weakref
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -39,7 +41,7 @@ def _sidecar_path(path: Path) -> Path:
 
 # Module-level guard for in-process cross-thread locking.
 # Keyed by the resolved sidecar path string.
-_global_locks: dict[str, threading.RLock] = {}
+_global_locks: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
 _global_locks_guard = threading.Lock()
 
 # Track acquisition depth per thread per sidecar path so we only acquire the
@@ -91,7 +93,8 @@ def file_lock(path: Path, blocking: bool = True, create_parents: bool = True) ->
 
     # In-process lock first (RLock is re-entrant within the same thread).
     proc_lock = _get_process_lock(sidecar)
-    proc_lock.acquire()
+    if not proc_lock.acquire(blocking=blocking):
+        raise TimeoutError(f"File is locked: {path.name}")
 
     # Track nesting depth for this thread+sidecar path.
     tid = threading.get_ident()
@@ -137,7 +140,17 @@ def _acquire_os_lock(lock_file, blocking: bool) -> None:
                 return
             except OSError:
                 raise TimeoutError(f"File is locked: {lock_file.name}")
-        msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+        # LK_LOCK has a finite retry window. CAD operations can outlast it;
+        # keep the documented blocking semantics without losing lock identity.
+        while True:
+            try:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                return
+            except OSError as exc:
+                if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                    raise
+                time.sleep(0.05)
     else:
         import fcntl
 
