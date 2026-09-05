@@ -18,3 +18,10 @@ ODA File Converter 和 LibreDWG 仅作为备用。DXF 输入不需要 DWG 转换
 AutoCAD/浩辰/中望 COM 只在运行后端的 Windows 主机上探测；注册 ProgID
 不等于激活成功。保持发现、超时、专用 COM 进程和默认串行限制
 CAD_COM_CONCURRENCY=1，不要声称会自动安装 CAD。
+
+## 单向转换，翻译后不回转 DWG
+
+DWG → DXF 是**单向**转换：它只用于让 ezdxf 能读取和编辑图纸文字。翻译并
+回填完成后，交付物是 DXF。除非用户明确要求 DWG 输出，否则**不要**再调用
+任何后端（COM、ODA File Converter、LibreDWG）把翻译后的 DXF 转回 DWG——
+那是不必要的多余步骤。
