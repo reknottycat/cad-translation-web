@@ -12,7 +12,7 @@ tags: [dependencies, installation, requirements]
 项目主线要求 Python 3.10+。从仓库根目录安装后端和维护中的 CLI：
 
 ~~~powershell
-python -m pip install -r backend\requirements.txt
+python -m pip install -i https://mirrors.aliyun.com/pypi/simple -r backend\requirements.txt
 python -m pip install -e agent-harness
 cad-translate --help
 cad-translate doctor
@@ -24,6 +24,11 @@ cad-translate doctor
 cd frontend
 npm install
 ~~~
+
+> **国内镜像加速：** `frontend/.npmrc` 已将 npm 源指向淘宝 npmmirror
+> （`https://registry.npmmirror.com`）。若 pip 安装 PyPI 官方源过慢，
+> 可使用阿里云镜像（如上方所示，添加 `-i https://mirrors.aliyun.com/pypi/simple`
+> 参数，或设置环境变量 `PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple`）。
 
 CLI 的 `pyproject.toml` 声明了 `click`、`ezdxf`、`pandas`、`openpyxl`、
 `pydantic-settings` 等运行依赖；不要再从根目录历史脚本推导安装入口。

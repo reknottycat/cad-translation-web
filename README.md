@@ -44,6 +44,19 @@ cp .env.example .env
 python run_server.py
 ```
 
+> **China mirror note:** To speed up dependency installation in China,
+> `frontend/.npmrc` already points npm to the npmmirror registry
+> (`https://registry.npmmirror.com`). For pip, install with the Aliyun
+> mirror if PyPI is slow in your region:
+>
+> ```bash
+> cd backend
+> pip install -i https://mirrors.aliyun.com/pypi/simple -r requirements.txt
+> ```
+>
+> Or set `PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple` once for the
+> current session (Windows: `set PIP_INDEX_URL=...`, Unix: `export PIP_INDEX_URL=...`).
+
 ### Frontend
 
 ```bash

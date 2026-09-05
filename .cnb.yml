@@ -19,6 +19,7 @@ main:
         image: python:3.11
       env:
         PYTHONDONTWRITEBYTECODE: "1"
+        PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple
       stages:
         - name: install-deps
           script: pip install -r requirements.txt
@@ -60,6 +61,7 @@ main:
         image: python:3.11
       env:
         PYTHONDONTWRITEBYTECODE: "1"
+        PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple
       stages:
         - name: install-deps
           script: pip install -r requirements.txt
@@ -140,6 +142,7 @@ main:
       env:
         RELEASE_VERSION: $CNB_BRANCH
         EXE_ARTIFACT: $CNB_BUILD_WORKSPACE/cad-translation-web-$CNB_BRANCH-windows-exe.zip
+        PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple
       stages:
         - name: prepare-env
           # self-hosted Windows runner 上脚本默认走 PowerShell
@@ -263,6 +266,7 @@ main:
       env:
         RELEASE_VERSION: $CNB_BRANCH
         EXE_ARTIFACT: $CNB_BUILD_WORKSPACE/cad-translation-web-$CNB_BRANCH-windows-exe.zip
+        PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple
       stages:
         - name: prepare-env
           script: |

@@ -64,6 +64,18 @@ cp .env.example .env
 python run_server.py
 ```
 
+> **国内镜像加速：** 为加速国内依赖安装，`frontend/.npmrc` 已将 npm 源指向
+> 淘宝 npmmirror 镜像（`https://registry.npmmirror.com`）。若 pip 安装
+> PyPI 官方源过慢，请使用阿里云镜像：
+>
+> ```bash
+> cd backend
+> pip install -i https://mirrors.aliyun.com/pypi/simple -r requirements.txt
+> ```
+>
+> 或为当前会话设置环境变量：`PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple`
+> （Windows：`set PIP_INDEX_URL=...`，Unix：`export PIP_INDEX_URL=...`）。
+
 ### 前端
 
 ```bash
