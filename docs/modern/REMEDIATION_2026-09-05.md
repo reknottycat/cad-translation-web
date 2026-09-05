@@ -49,8 +49,15 @@
 | 产物 | 值 |
 |---|---|
 | 文件名 | `cad-translation-web-v2.1.0-windows-exe.zip` |
-| 字节数 | `72171815` |
-| ZIP SHA-256 | `55b0b5399ab529b102c0e1ed2f3d0ce087409939b56d7bb901e0b664900824fd` |
-| payload SHA-256 | `b55497d2f046945fcb721ba42f276d58fac87df3d115ae74455defcfc29b2cf1` |
+| 字节数 | `72166671` |
+| ZIP SHA-256 | `0fc8a206f186b906d8bdcde425464f305bc466d84add9eb3d19cb91192d4fd19` |
+| payload SHA-256 | `e4d398a055dd6edf1166cc0393194c62188ae8713218960a9ea3253a85ac9b0b` |
 
-本地交付目录为 `C:\Users\zhenhe\Downloads\CAD-Translation-v2.1.0-20260905`，同时包含 `verification.json` 与逐文件 `source-snapshot.json`。本记录不表示已经创建或上传新的远端 Release。
+本地交付目录为 `C:\Users\zhenhe\Downloads\CAD-Translation-v2.1.0-20260906`，同时包含 `verification.json` 与逐文件 `source-snapshot.json`。本记录不表示已经创建或上传新的远端 Release。
+
+
+## 2026-09-06 合入前审查复核
+
+CodeBuddy 对 `766176a5` 的独立审查未发现 P0/P1，列出四项 P2。已核实并修正：拒绝 `***` 占位凭据且保持原配置不变、Windows 原生锁测试在非 Windows 跳过、清理本次替换的不完整代码缓存、按实际上传根目录清理 Excel 输入并保留外部同名目录文件。
+
+复核完整回归为 **255 passed in 267.46s**；定向回归39项通过。原生 Windows 重新构建117.234秒，冻结EXE两次启动和配置/项目/任务持久化通过，ZIP与内层payload审核通过；上表为此次更新后的产物及哈希。此前2026-09-05产物保留，但不包含本轮审查修正。

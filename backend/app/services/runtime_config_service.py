@@ -107,6 +107,8 @@ class RuntimeConfigService:
     def _resolve_api_key(self, provider: str, explicit_api_key: Any = None) -> tuple[str, str]:
         if explicit_api_key is not None:
             candidate = str(explicit_api_key or "").strip()
+            if candidate == "***":
+                raise ValueError("API key is a masked placeholder. Omit api_key to keep the saved credential.")
             if candidate:
                 return candidate, "config"
 

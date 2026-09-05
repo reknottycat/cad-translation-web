@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,24 @@ from app.database import (
     SessionLocal,
     init_db,
 )
+
+
+@pytest.mark.parametrize("managed", [True, False])
+def test_excel_cleanup_uses_configured_upload_root(tmp_path, monkeypatch, managed):
+    from app.services.tasks import translation_tasks as tasks
+
+    uploads = tmp_path / "custom-inputs"
+    source_dir = uploads if managed else tmp_path / "external" / "uploads"
+    source_dir.mkdir(parents=True)
+    source = source_dir / "drawing.xlsx"
+    source.write_bytes(b"fixture")
+    monkeypatch.setattr(tasks, "settings", SimpleNamespace(
+        get_upload_path=lambda: uploads, get_output_path=lambda: tmp_path / "outputs"))
+    monkeypatch.setattr(tasks.translate_excel_task, "update_state", lambda **kwargs: None)
+    monkeypatch.setattr(tasks.ai_excel_processor, "translate_excel_file", lambda **kwargs: {})
+    monkeypatch.setattr(tasks.ai_excel_processor, "create_translation_report", lambda *args: None)
+    assert tasks.translate_excel_task.run(str(source))["success"] is True
+    assert source.exists() is not managed
 
 
 @pytest.fixture(autouse=True)

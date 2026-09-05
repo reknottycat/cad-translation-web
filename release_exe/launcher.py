@@ -252,10 +252,20 @@ def main() -> int:
                         raise FileNotFoundError(f"payload is missing {required}")
                 (staging / ".payload-ready").write_text(payload_hash, encoding="ascii")
                 root_dir.parent.mkdir(parents=True, exist_ok=True)
+                stale = None
                 if root_dir.exists():
                     stale = root_dir.with_name(f"{root_dir.name}.stale-{os.getpid()}")
                     os.replace(root_dir, stale)
                 os.replace(staging, root_dir)
+                if stale is not None and stale.resolve().parent == root_dir.parent.resolve():
+                    import shutil
+
+                    # Only this replaced incomplete cache is disposable. Other
+                    # payload hashes may still be used by a running instance.
+                    try:
+                        shutil.rmtree(stale)
+                    except OSError:
+                        pass  # A file in use must not prevent the new runtime starting.
         except Exception as exc:  # noqa: BLE001 - 启动失败时给出可读提示
             print(f"[CAD] 解压运行负载失败: {exc}")
             return 1

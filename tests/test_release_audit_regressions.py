@@ -171,6 +171,7 @@ def test_launcher_env_uses_only_settings_fields(tmp_path: Path) -> None:
     assert not settings.ENABLE_ADMIN_GUARD
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Exercises native Windows msvcrt launcher locking")
 def test_launcher_repairs_incomplete_cache_and_preserves_data(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -198,3 +199,4 @@ def test_launcher_repairs_incomplete_cache_and_preserves_data(
     assert launcher.main() == 0
     assert (data / "sentinel").read_text() == "durable"
     assert not list(data.glob(".runtime-*.env"))
+    assert not list(cache.parent.glob("*.stale-*"))

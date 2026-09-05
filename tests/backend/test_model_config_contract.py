@@ -75,6 +75,16 @@ def test_public_summary_never_returns_provider_secrets(runtime_config_file: Path
     assert summary["provider_profiles"]["deepseek"]["model"] == "remembered-deepseek"
 
 
+def test_masked_placeholder_cannot_overwrite_saved_key(runtime_config_file: Path) -> None:
+    _write_runtime(runtime_config_file)
+    from app.services.runtime_config_service import RuntimeConfigService
+
+    before = runtime_config_file.read_bytes()
+    with pytest.raises(ValueError, match="masked placeholder"):
+        RuntimeConfigService().update_runtime_config({"provider": "openai", "api_key": "***"})
+    assert runtime_config_file.read_bytes() == before
+
+
 def test_omitted_or_blank_key_preserves_existing_secret(runtime_config_file: Path) -> None:
     _write_runtime(runtime_config_file)
     from app.services.runtime_config_service import RuntimeConfigService

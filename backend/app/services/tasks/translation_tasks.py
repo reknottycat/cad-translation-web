@@ -121,7 +121,7 @@ def translate_excel_task(
             processing_time = time.time() - start_time
             
             # 清理输入文件（如果是临时文件）
-            if input_path.parent.name == "uploads":
+            if input_path.resolve().parent == settings.get_upload_path().resolve():
                 try:
                     os.unlink(input_file_path)
                     logger.info("已清理临时输入文件", file=input_file_path)
