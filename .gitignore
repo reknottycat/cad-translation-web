@@ -193,6 +193,7 @@ spec/
 runtime_payload.zip
 exe_artifact_path.txt
 package-lock.json
+!frontend/package-lock.json
 
 # Superseded/legacy components removed from release repo
 .trans_CAD_gui_V1.0/

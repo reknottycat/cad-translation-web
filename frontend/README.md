@@ -6,9 +6,11 @@
 
 ```powershell
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
+
+前端 `package-lock.json` 纳入版本管理；本地与 CNB 使用 `npm ci` 进行可复现安装。修改依赖后同步提交 `package.json` 和锁文件。
 
 默认 API 前缀为 `/api`。需要连接其他后端时设置：
 
