@@ -188,6 +188,10 @@ scale_release_exe/
 release_exe/*.spec
 release_exe/build/
 release_exe/dist/
+# 云端 Wine 交叉打包中间产物
+spec/
+runtime_payload.zip
+exe_artifact_path.txt
 package-lock.json
 
 # Superseded/legacy components removed from release repo

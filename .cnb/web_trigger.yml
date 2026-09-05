@@ -15,6 +15,6 @@ branch:
           roles: [master]
       - name: 生成 Windows EXE
         event: web_trigger_exe
-        description: 在 Windows 自托管 Runner 上生成便携 EXE 交付包（需已接入 windows 节点）
+        description: 云端交叉打包（Wine + PyInstaller）生成便携 EXE 交付包，无需自托管 Runner
         permissions:
           roles: [master]
