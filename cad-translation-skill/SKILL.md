@@ -47,6 +47,12 @@ provider/API Key。
    已配置的 LLM provider 批量处理。
 4. **Excel → DXF**：使用 replace 或 add 模式回填，保留原始文件和任务日志。
 
+**交付约定（Agent 直接处理时）**：翻译回填完成后，最终交付的就是 DXF
+文件。**不要**再把翻译后的 DXF 转回 DWG——DWG → DXF 只是为了便于 ezdxf
+读取和编辑文字；翻译完成后直接交给用户 DXF 即可。除非用户明确要求 DWG
+输出，否则不要额外执行 COM / ODA / LibreDWG 的 DWG 回转，也不要把这种
+多余转换写进交付结果。
+
 Web 全流程接口是 /api/cad/upload；分步接口是 /api/cad/extract 和
 /api/cad/apply-translation。接口以 /api/docs 和仓库中的 API 路由参考为准。
 

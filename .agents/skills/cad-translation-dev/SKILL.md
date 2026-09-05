@@ -120,6 +120,16 @@ cannot access the needed model/tool or the input is too large, report that
 boundary clearly and use the project's configured runtime only when the user
 has provided and authorized it.
 
+## Agent drawing-handling deliverable (DXF only)
+
+When the Agent processes a drawing directly in **Agent-assisted mode** and the
+user asks for a translated result, deliver the final **DXF** produced by the
+backfill (`apply`) step. Do **not** run an extra round-trip that converts the
+translated DXF back to DWG. DWG -> DXF is only needed so ezdxf can read and
+edit the text; after translation the DXF is already the intended deliverable.
+Skip redundant DWG conversion (COM, ODA File Converter, or LibreDWG) unless the
+user explicitly asks for a DWG output.
+
 ## Windows CAD and internal multi-user boundary
 
 - AutoCAD, GStarCAD/浩辰, and ZWCAD COM are capabilities of the Windows host running the backend, not of a browser client. Detection enumerates registered COM ProgIDs and the process table; it does not install CAD software. For DWG compatibility, prefer an installed vendor CAD COM backend; ODA File Converter and LibreDWG are fallback options and should be validated before production use. See docs/modern/AUTOCAD_COM_DETECTION.md.
