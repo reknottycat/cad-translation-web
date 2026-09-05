@@ -130,6 +130,55 @@ edit the text; after translation the DXF is already the intended deliverable.
 Skip redundant DWG conversion (COM, ODA File Converter, or LibreDWG) unless the
 user explicitly asks for a DWG output.
 
+## Agent bilingual translation: auto-detect keep-vs-translate
+
+When the target language is Russian and the drawing text mixes Chinese and
+English, decide per text using the recommended auto-detection logic (do not
+blindly translate every string):
+
+    target = Russian
+
+    IF text is already Russian:            KEEP
+    ELIF text is Chinese:                  TRANSLATE_TO_RUSSIAN
+    ELIF text is English:
+        IF user asked to keep EN+RU bilingual:  KEEP
+        ELSE:
+            IF it is a name / model / tag /
+               standard / code / unit:          KEEP
+            ELSE:                                TRANSLATE_TO_RUSSIAN
+    ELSE:                                  KEEP
+
+For a mixed string such as `XV-101 Solenoid Valve`: protect the identifier
+`XV-101` (model/tag) and translate only the descriptive part
+`Solenoid Valve` → `Электромагнитный клапан`, yielding
+`XV-101 Электромагнитный клапан`. Never translate protected identifiers
+(names, model numbers, tags/位号, standards, codes, units).
+
+## Agent standard bilingual workflow
+
+DWG
+→ DWG→DXF
+→ extract all TEXT / MTEXT / ATTRIB / ATTDEF / BLOCK
+→ language detection
+→ build the existing term table
+→ identify Chinese-only text
+→ Chinese → Russian
+→ backfill (apply)
+→ verify Chinese residual = 0
+→ does the user require full Russian unification?
+    ├─ no  → done
+    └─ yes →
+        extract English-only text
+        exclude names / models / tags / standards / codes / units
+        English → Russian
+        backfill (apply)
+        classify remaining English residual
+        check CAD layout
+        final DXF
+
+This is Agent guidance for how to decide keep vs translate; the actual
+extraction/backfill steps reuse backend/app implementations as described above.
+
 ## Windows CAD and internal multi-user boundary
 
 - AutoCAD, GStarCAD/浩辰, and ZWCAD COM are capabilities of the Windows host running the backend, not of a browser client. Detection enumerates registered COM ProgIDs and the process table; it does not install CAD software. For DWG compatibility, prefer an installed vendor CAD COM backend; ODA File Converter and LibreDWG are fallback options and should be validated before production use. See docs/modern/AUTOCAD_COM_DETECTION.md.

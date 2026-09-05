@@ -53,6 +53,32 @@ provider/API Key。
 输出，否则不要额外执行 COM / ODA / LibreDWG 的 DWG 回转，也不要把这种
 多余转换写进交付结果。
 
+**双语自动判断指引（目标语言为俄文，中/英混排时）**：对每条文本按推荐逻辑判断
+保留还是翻译，不要盲目全译：
+
+~~~
+目标语言 = Russian
+
+IF 文本已是俄文:             KEEP
+ELIF 文本是中文:              TRANSLATE_TO_RUSSIAN
+ELIF 文本是英文:
+    IF 用户要求保留英俄双语:   KEEP
+    ELSE:
+        IF 是人名/型号/位号/标准/编码/单位:  KEEP
+        ELSE:                                TRANSLATE_TO_RUSSIAN
+ELSE:                        KEEP
+~~~
+
+**混合字符串**如 `XV-101 Solenoid Valve`：保护型号/位号 `XV-101`，只翻译
+描述部分 `Solenoid Valve` → `Электромагнитный клапан`，得到
+`XV-101 Электромагнитный клапан`。人名、型号、位号、标准、编码、单位一律不译。
+
+**Agent 标准双语工作流**：DWG → DWG→DXF → 提取全部 TEXT/MTEXT/ATTRIB/ATTDEF/BLOCK
+→ 语言识别 → 建立已有术语表 → 识别中文-only → 中文→俄文 → 回填 → 验证中文残留=0
+→ 判断用户是否要求统一俄文（否→完成；是→提取英文-only、排除人名/型号/位号/标准/
+编码/单位、英文→俄文、回填、英文残留分类检查、CAD 版式检查）→ 最终交付 DXF。
+详见 rules/06-bilingual-translation.md。
+
 Web 全流程接口是 /api/cad/upload；分步接口是 /api/cad/extract 和
 /api/cad/apply-translation。接口以 /api/docs 和仓库中的 API 路由参考为准。
 
