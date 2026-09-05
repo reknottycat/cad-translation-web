@@ -13,16 +13,9 @@ This document describes the backend API that is actually implemented by the Fast
 
 ### `GET /`
 
-Response:
+Serves the built workbench when `frontend/dist/index.html` is present. Otherwise returns API metadata, including the version read from `backend/app/version.py`.
 
-```json
-{
-  "message": "CAD translation backend API",
-  "version": "1.0.0",
-  "docs": "/api/docs",
-  "status": "running"
-}
-```
+Data, configuration, translation and download endpoints require the configured admin credential when Admin Guard is enabled, including compatibility `/uploads/`, `/outputs/` and `/api/translate` routes. Supply `X-Admin-Token` or `Authorization: Bearer`; missing server credentials under an enabled guard return 503, invalid client credentials return 403.
 
 ### `GET /api/health`
 
@@ -206,7 +199,8 @@ Request:
 
 Notes:
 - If `api_key` is omitted, backend preserves the existing key from runtime config or environment.
-- Runtime config persists to `backend/config/runtime_config.local.json`.
+- The effective runtime config path is reported by the service; the default is the user configuration directory and may be overridden by `CAD_TRANSLATION_RUNTIME_CONFIG_FILE`.
+- Credential update semantics and provider profiles have one reference: [LLM configuration](LLM_PROVIDERS.md). Configuration reads return credential status/masks, not provider API keys.
 
 ### `POST /api/translation/test-connection`
 
@@ -284,6 +278,7 @@ Request:
   "task_id": "abcd1234",
   "translations": [
     {
+      "record_id": "abcd1234_0",
       "original": "PUMP",
       "translated": "НАСОС"
     }
@@ -306,11 +301,30 @@ Response:
 
 ### `GET /api/cad/tasks`
 
-Returns Route B task list with artifact URLs.
+Returns `{success, data, total, limit, offset}` with task summaries and authenticated artifact URLs.
+Query parameters: `limit` (default 100, range 1–1000), `offset` (default 0), `updated_after` (optional Unix timestamp for last activity).
+
+### `GET /api/cad/tasks/{task_id}`
+
+Returns `{success, data}` with the current task summary. Missing tasks return 404.
+
+### `POST /api/cad/upload`
+
+Multipart fields include `file`, `converter_backend`, `target_language`, `extract_only`, `translation_mode`, `font_name`, `font_size_reduction` and `background`. Set `background=true` to save the input and enqueue the job:
+
+```json
+{"success": true, "data": {"task_id": "abcd1234", "status": "queued", "stage": "queued"}}
+```
+
+This response has HTTP status 202. Poll the task ID for completion; acceptance does not mean translation succeeded. Omitting `background` retains synchronous compatibility behavior. A full local queue returns 409; retry after an active job finishes.
+
+### `POST /api/cad/tasks/{task_id}/resume`
+
+JSON accepts `background`, `target_language`, `translation_mode`, `font_name`, and `font_size_reduction`. Background mode returns 202. An already queued/running execution returns 409. Recovery reuses saved input/checkpoints, and partial output does not suppress retry of failed items. Omitted language/layout options inherit the original task settings. Changing target language during resume returns 400; restart the task to translate into another language. Missing tasks return 404 before enqueueing.
 
 ### `DELETE /api/cad/tasks/{task_id}`
 
-Deletes a Route B task directory.
+Cancels and deletes the selected task directory under its lifecycle lock. A previously created download snapshot remains readable until its response completes.
 
 ### `GET /api/cad/download/{task_id}/{file_type}`
 
@@ -319,6 +333,8 @@ Supported `file_type` values:
 - `cad`
 - `translated_cad`
 - `log`
+
+For distinct translations of identical source text, include the `record_id` returned by extraction. Conflicting legacy original-text mappings are rejected. Font-size reduction is an absolute DXF text-height amount, not a scale ratio.
 
 ### Other CAD routes
 

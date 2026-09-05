@@ -17,6 +17,7 @@ collect-* 参数，避免把整条依赖树硬编码在 PowerShell 脚本里。
 from __future__ import annotations
 
 import json
+import importlib.util
 import sys
 from typing import Any, Dict, List
 
@@ -54,6 +55,17 @@ HIDDEN_IMPORTS: List[str] = [
     "structlog",
     "dotenv",
     "dotenv.main",
+    "yaml",
+    "psutil",
+    "xlrd",
+    "redis",
+    "jose",
+    "passlib",
+    "rich",
+    "pandas",
+    "openpyxl",
+    "ezdxf",
+    "cryptography",
 ]
 
 # 需要递归收集所有子模块的包
@@ -70,31 +82,47 @@ COLLECT_SUBMODULES: List[str] = [
     # 因此这两个纯 Python 包必须显式收集，否则启动报 ModuleNotFoundError。
     "aiofiles",
     "requests",
+    "celery",
+    "kombu",
 ]
 
 # 需要把包内的数据文件一并收集的包
 COLLECT_DATA: List[str] = [
     "certifi",
-    "passlib",
     "structlog",
 ]
 
 # 需要整包收集（模块 + 数据 + 子模块）的包
-COLLECT_ALL: List[str] = [
-    "celery",
-    "pandas",
-    "openpyxl",
-    "ezdxf",
-    "cryptography",
+COLLECT_ALL: List[str] = []
+
+EXCLUDE_MODULES: List[str] = [
+    "pandas.tests", "numpy.tests", "passlib.tests", "celery.contrib.testing",
+    "celery.contrib.pytest", "sqlalchemy.testing", "pytest",
 ]
 
 
+def validate_runtime_dependencies() -> None:
+    """PyInstaller otherwise logs a missing hidden import but exits successfully."""
+    required = (
+        "fastapi", "uvicorn", "pydantic", "pydantic_settings", "sqlalchemy",
+        "celery", "redis", "yaml", "ezdxf", "pandas", "openpyxl", "xlrd",
+        "requests", "aiofiles", "structlog", "dotenv", "psutil", "jose",
+        "passlib", "cryptography",
+    )
+    missing = [name for name in required if importlib.util.find_spec(name) is None]
+    if missing:
+        raise RuntimeError("Missing release runtime dependencies: " + ", ".join(missing)
+                           + "; install backend/requirements.txt in the build environment")
+
+
 def main() -> int:
+    validate_runtime_dependencies()
     manifest: Dict[str, Any] = {
         "hidden_imports": HIDDEN_IMPORTS,
         "collect_submodules": COLLECT_SUBMODULES,
         "collect_data": COLLECT_DATA,
         "collect_all": COLLECT_ALL,
+        "exclude_modules": EXCLUDE_MODULES,
     }
     json.dump(manifest, sys.stdout, ensure_ascii=False)
     return 0

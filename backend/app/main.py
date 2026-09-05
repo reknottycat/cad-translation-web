@@ -10,16 +10,19 @@ from pathlib import Path
 
 import structlog
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .version import __version__
 from .config import get_settings
-from .database import Base, engine
+from .database import init_db, check_db_health
+from starlette.concurrency import run_in_threadpool
 from .routers import files, projects, translation
 from .services.celery_app import check_celery_health
+from .security import require_admin_access
+from .utils.file_utils import resolve_within_directory
 
 
 structlog.configure(
@@ -54,8 +57,10 @@ frontend_index_file = frontend_dist_dir / "index.html"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("backend_starting", base_dir=str(settings.BASE_DIR))
-    Base.metadata.create_all(bind=engine)
+    await run_in_threadpool(init_db)
     settings.get_temp_path()
+    from .services.cad_pipeline_service import cad_pipeline_service
+    await run_in_threadpool(cad_pipeline_service.recover_interrupted_jobs)
     logger.info(
         "backend_directories_ready",
         static=str(static_dir),
@@ -84,8 +89,6 @@ app.add_middleware(
 )
 
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
-app.mount("/uploads", StaticFiles(directory=str(upload_dir)), name="uploads")
-app.mount("/outputs", StaticFiles(directory=str(output_dir)), name="outputs")
 if frontend_assets_dir.exists():
     app.mount("/assets", StaticFiles(directory=str(frontend_assets_dir)), name="frontend_assets")
 
@@ -103,8 +106,28 @@ except Exception as exc:  # pragma: no cover - defensive logging for optional ro
     logger.warning("cad_router_registration_failed", error=str(exc))
 
 
-@app.post("/api/translate")
-async def simple_translate(request: dict):
+@app.get("/uploads/{path:path}", dependencies=[Depends(require_admin_access)])
+def download_upload(path: str):
+    return _protected_artifact(upload_dir, path)
+
+
+@app.get("/outputs/{path:path}", dependencies=[Depends(require_admin_access)])
+def download_output(path: str):
+    return _protected_artifact(output_dir, path)
+
+
+def _protected_artifact(root: Path, path: str):
+    try:
+        artifact = resolve_within_directory(root, path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid artifact path") from exc
+    if not artifact.is_file():
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    return FileResponse(artifact, filename=artifact.name)
+
+
+@app.post("/api/translate", dependencies=[Depends(require_admin_access)])
+def simple_translate(request: dict):
     from .services.alibaba_ai_translation_service import AlibabaBailianTranslationService
 
     service = AlibabaBailianTranslationService()
@@ -115,7 +138,7 @@ async def simple_translate(request: dict):
             target_lang=request.get("target_lang", "zh"),
         )
         return {
-            "success": True,
+            "success": not translated_text.startswith("[translation_error]"),
             "original_text": request.get("text", ""),
             "translated_text": translated_text,
             "source_lang": request.get("source_lang", "auto"),
@@ -145,15 +168,16 @@ async def root():
 
 
 @app.get("/api/health")
-async def health_check():
+def health_check():
     celery_info = check_celery_health()
     celery_healthy = celery_info["status"] == "healthy"
+    database_healthy = check_db_health()
 
     return {
-        "status": "healthy" if celery_healthy else "degraded",
+        "status": "healthy" if celery_healthy and database_healthy else "degraded",
         "celery": celery_info["mode"],
         "async_runtime": celery_info,
-        "database": "connected",
+        "database": "connected" if database_healthy else "unavailable",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 

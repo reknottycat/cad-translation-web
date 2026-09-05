@@ -44,6 +44,7 @@ class TextExtractor:
         """
         dxf_path = Path(dxf_file_path)
         output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
 
         logger.info("text_extract_start", file=str(dxf_path))
 
@@ -109,6 +110,11 @@ class TextExtractor:
         texts = []
         for entity in space:
             try:
+                if entity.dxftype() == "INSERT":
+                    for attrib in entity.attribs:
+                        info = self._extract_entity(attrib, space_name)
+                        if info:
+                            texts.append(info)
                 info = self._extract_entity(entity, space_name)
                 if info:
                     texts.append(info)
@@ -141,6 +147,7 @@ class TextExtractor:
                 "序号": None,
                 "原文": text_content.strip(),
                 "译文": "",
+                "实体句柄": str(entity.dxf.handle or ""),
                 "实体类型": entity_type,
                 "空间": space_name,
                 "图层": layer,

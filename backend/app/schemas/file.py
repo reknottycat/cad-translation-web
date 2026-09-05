@@ -5,7 +5,7 @@
 File-related Pydantic models
 """
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import Optional, List
 from datetime import datetime
 from enum import Enum
@@ -49,15 +49,14 @@ class FileListResponse(BaseModel):
     error_message: Optional[str] = None
     created_at: datetime
     updated_at: datetime
-    
+
     # 处理结果文件路径状态
     has_converted: bool = False
     has_excel: bool = False
     has_translated: bool = False
-    
-    class Config:
-        from_attributes = True
-    
+
+    model_config = ConfigDict(from_attributes=True)
+
     @classmethod
     def from_orm(cls, obj):
         """从ORM对象创建响应模型"""
@@ -110,27 +109,26 @@ class FileDetailResponse(BaseModel):
     status: str
     progress: Optional[int] = 0
     error_message: Optional[str] = None
-    
+
     # 处理结果路径
     converted_path: Optional[str] = None
     excel_path: Optional[str] = None
     translated_path: Optional[str] = None
-    
+
     # 处理统计
     total_texts: Optional[int] = 0
     translated_texts: Optional[int] = 0
-    
+
     # 时间戳
     created_at: datetime
     updated_at: datetime
     processed_at: Optional[datetime] = None
-    
-    class Config:
-        from_attributes = True
+
+    model_config = ConfigDict(from_attributes=True)
 
 class FileProcessingRequest(BaseModel):
     """文件处理请求模型"""
-    file_ids: List[int] = Field(..., min_items=1, description="要处理的文件ID列表")
+    file_ids: List[int] = Field(..., min_length=1, description="要处理的文件ID列表")
     config: Optional[dict] = Field(None, description="处理配置")
 
 class FileProcessingStatus(BaseModel):

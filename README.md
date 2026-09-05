@@ -5,19 +5,26 @@ A web-based CAD drawing translation system. It extracts text from DWG/DXF drawin
 This repository contains the Web application (FastAPI backend + React frontend)
 and the maintained `cad-translate` CLI.
 
+Architecture, model configuration, performance, and Windows delivery findings:
+[2026-09-05 audit report](docs/modern/AUDIT_2026-09-05.md) (commit-scoped review).
+Current behavior and module boundaries: [architecture](docs/modern/ARCHITECTURE.md).
+Implemented fixes and validation: [remediation record](docs/modern/REMEDIATION_2026-09-05.md).
+
 ## Features
 
-- DWG/DXF conversion with multiple backends (ACadSharp, ODA, COM, LibreDWG)
+- DWG/DXF conversion through COM, ODA, LibreDWG, or native DXF processing
 - Precise MTEXT/TEXT extraction with ezdxf
 - Batch translation through 10+ LLM providers (OpenAI, DeepSeek, Qwen, Kimi, OpenRouter, and more)
-- Custom OpenAI-compatible endpoints
+- Custom provider profiles with an explicit request protocol and ordered fallback models
 - CSV/XLSX glossary auto-replacement
 - Legacy .xls glossary support (xlrd)
 - Translation cache, smart filtering, and think-tag stripping
 - Rate limiting (RPM/TPM), custom request body (extra_body), proxy control, and configurable retries
 - Replace, append, and line-break backfill modes
-- Resume failed items, partial completion state, real-time task logs
-- Provider-aware model memory
+- Resume failed items with original language/layout settings, partial completion state, real-time task logs
+- Rebuildable SQLite history index with paginated task queries
+- Persistent provider profiles and write-only credential updates
+- Bounded background CAD jobs, entity-addressed backfill, and authenticated artifact downloads
 
 ## Quick Start
 
@@ -61,7 +68,7 @@ python run_server.py
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
@@ -256,6 +263,7 @@ Run the security audit with:
 | [CAD_CONVERTER_BACKENDS.md](docs/modern/CAD_CONVERTER_BACKENDS.md) | DWG conversion backends |
 | [AUTOCAD_COM_DETECTION.md](docs/modern/AUTOCAD_COM_DETECTION.md) | AutoCAD COM auto-detection & deployment prerequisites |
 | [RELEASE_SCALE.md](docs/modern/RELEASE_SCALE.md) | Packaging and release flow |
+| [CHANGELOG.md](CHANGELOG.md) | Version changes and validation records |
 | [PROJECT_NAVIGATION.md](docs/modern/PROJECT_NAVIGATION.md) | Project directory navigation |
 | [AGENTS.md](AGENTS.md) | Development guide for AI assistants |
 
@@ -392,12 +400,12 @@ The LLM/CAD runtime configuration (stored in `~/.config/cli-anything-cad/config.
   holds the lifecycle lock and wants the task-file lock). A single
   **global** coordination lock
   (`outputs/cad_task_lifecycle/_task_create_or_clear.coord`) additionally
-  serializes the *registration* critical region of `extract_upload`
-  (mkdir → upload → convert/extract → first `task.json`) with the *whole*
+  serializes the *registration* critical region of `reserve_upload`
+  (mkdir → initial `task.json`) with the *whole*
   `clear_all_tasks` (cancel-marking + enumeration/deletion + marker cleanup), so
   a task created concurrently with a clear can neither escape the clear nor be
-  deleted while it is being written. Normal per-task processing (translation)
-  uses only per-task locks and is not serialized by the global lock.
+  deleted while it is being written. Upload copying, conversion, extraction,
+  and translation use per-task locks and do not hold the global registration lock.
 - **Stage product writes are protected against delete**: every stage that
   creates/writes products inside a task directory (apply's translated DXF/Excel
   outputs and metadata write-back in `apply_translation`, checkpoint/log writes,
@@ -414,4 +422,6 @@ The LLM/CAD runtime configuration (stored in `~/.config/cli-anything-cad/config.
 - **Cross-process cancellation is file-based**: stop/cancel operations write a `.cancel` marker in a **stable external directory** (`outputs/cad_cancel_marks/`), never inside the task directory. Any worker process running a task checks the marker before/after each chunk and aborts cleanly. The marker is removed when the task reaches a terminal state. Because markers live outside task directories, `delete_task` / `clear_all_tasks` never race with a running worker's cleanup path to recreate the task directory.
 - **Config snapshot per task**: each task stores a sanitized snapshot of the effective LLM/CAD runtime config in `task.json` at creation time. The actual LLM translation calls use the frozen `llm` section from this snapshot via a thread-local context manager (`LLMTranslationService.frozen_config`), so a mid-flight global config change cannot alter a task's actual provider/model/batch_size/parameters. API keys are resolved live at call time (not stored in the snapshot).
 - LLM rate-limit buckets are per-process. Under multi-worker Celery, RPM/TPM quotas may be exceeded by the aggregate of all workers.
-- `CADPipelineService` module exceeds the 800-line guideline; splitting into submodules is tracked as a follow-up task.
+- `CADPipelineService` is a facade over the task modules documented in
+  [ARCHITECTURE.md](docs/modern/ARCHITECTURE.md); the changed source modules stay
+  within the 800-line limit.

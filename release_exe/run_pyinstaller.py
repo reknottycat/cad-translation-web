@@ -26,10 +26,13 @@ from pyinstaller_manifest import (  # noqa: E402
     COLLECT_ALL,
     COLLECT_SUBMODULES,
     HIDDEN_IMPORTS,
+    EXCLUDE_MODULES,
+    validate_runtime_dependencies,
 )
 
 
 def build_argv(payload: str) -> list:
+    validate_runtime_dependencies()
     argv = [
         "--noconfirm",
         "--onedir",
@@ -59,6 +62,8 @@ def build_argv(payload: str) -> list:
         argv += ["--collect-data", item]
     for item in COLLECT_ALL:
         argv += ["--collect-all", item]
+    for item in EXCLUDE_MODULES:
+        argv += ["--exclude-module", item]
     return argv
 
 

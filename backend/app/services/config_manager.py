@@ -72,6 +72,7 @@ def _normalize_legacy_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "extra_body",
         "use_system_proxy",
         "fallback_models",
+        "provider_profiles",
     }
 
     normalized: dict[str, Any] = {}
@@ -167,6 +168,10 @@ class LLMConfig(BaseModel):
     use_system_proxy: bool = False
     allow_demo_fallback: bool = False
     provider_api_keys: dict[str, str] = Field(default_factory=dict)
+    # Non-secret endpoint/model settings remembered independently for each
+    # provider. Credentials stay in provider_api_keys and are never returned by
+    # the public runtime-config API.
+    provider_profiles: dict[str, LLMEndpointConfig] = Field(default_factory=dict)
 
     @field_validator("system_prompt_mode")
     @classmethod
@@ -222,6 +227,7 @@ class ConfigManager:
                     "reasoning_enabled": self.settings.LLM_REASONING_ENABLED,
                 },
                 "fallback_models": [],
+                "provider_profiles": {},
                 "system_prompt_mode": self.settings.LLM_SYSTEM_PROMPT_MODE,
                 "custom_system_prompt": self.settings.LLM_CUSTOM_SYSTEM_PROMPT,
                 "glossary_file": self.settings.LLM_GLOSSARY_FILE,

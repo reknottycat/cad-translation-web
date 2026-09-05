@@ -4,12 +4,9 @@
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 from typing import Any, Dict
-
-import requests
 
 from app.config import get_settings, load_runtime_config
 from app.services.config_manager import ConfigManager
@@ -71,6 +68,36 @@ class RuntimeConfigService:
             return "openai_compatible"
         return preset.api_format
 
+    @staticmethod
+    def _normalize_provider(provider: Any) -> str:
+        normalized = str(provider or "custom").strip().lower()
+        return "custom" if normalized == "openai_compatible" else normalized
+
+    @staticmethod
+    def _public_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
+        """Return the durable, non-secret part of a provider profile."""
+        allowed = {
+            "format",
+            "base_url",
+            "model",
+            "timeout_seconds",
+            "temperature",
+            "max_tokens",
+            "reasoning_enabled",
+        }
+        return {key: profile[key] for key in allowed if key in profile}
+
+    def _stored_provider_profiles(self) -> Dict[str, Dict[str, Any]]:
+        file_runtime = self._global_llm_payload()
+        raw_profiles = file_runtime.get("provider_profiles")
+        if not isinstance(raw_profiles, dict):
+            return {}
+        return {
+            self._normalize_provider(provider): self._public_profile(profile)
+            for provider, profile in raw_profiles.items()
+            if isinstance(profile, dict)
+        }
+
     def _current_provider(self) -> str:
         file_runtime = self._global_llm_payload()
         primary = file_runtime.get("primary") if isinstance(file_runtime.get("primary"), dict) else {}
@@ -79,37 +106,51 @@ class RuntimeConfigService:
 
     def _resolve_api_key(self, provider: str, explicit_api_key: Any = None) -> tuple[str, str]:
         if explicit_api_key is not None:
-            return str(explicit_api_key or "").strip(), "config"
+            candidate = str(explicit_api_key or "").strip()
+            if candidate == "***":
+                raise ValueError("API key is a masked placeholder. Omit api_key to keep the saved credential.")
+            if candidate:
+                return candidate, "config"
 
         file_runtime = self._global_llm_payload()
         primary = file_runtime.get("primary") if isinstance(file_runtime.get("primary"), dict) else {}
+        normalized_provider = self._normalize_provider(provider)
 
         # 1. Check provider-specific api key from effective config (includes global config)
         effective_config = self._config_manager().get_effective_config()
         effective_llm = effective_config.get("llm") if isinstance(effective_config, dict) else {}
         effective_provider_api_keys = effective_llm.get("provider_api_keys") if isinstance(effective_llm, dict) else None
         if isinstance(effective_provider_api_keys, dict):
-            provider_key = str(effective_provider_api_keys.get(provider) or "").strip()
+            provider_key = str(effective_provider_api_keys.get(normalized_provider) or "").strip()
             if provider_key:
                 return provider_key, "config"
 
         # 2. Fallback to runtime config file (backward compatibility)
         provider_api_keys = file_runtime.get("provider_api_keys") if isinstance(file_runtime, dict) else None
         if isinstance(provider_api_keys, dict):
-            provider_key = str(provider_api_keys.get(provider) or "").strip()
+            provider_key = str(provider_api_keys.get(normalized_provider) or "").strip()
             if provider_key:
                 return provider_key, "config"
 
         # 3. Fallback to global api_key (backward compatibility)
+        primary_provider = self._normalize_provider(
+            primary.get("provider") or file_runtime.get("provider")
+        )
         file_api_key = str(primary.get("api_key") or file_runtime.get("api_key") or "").strip()
-        if file_api_key:
+        if primary_provider == normalized_provider and file_api_key:
             return file_api_key, "config"
 
-        preset = PROVIDER_PRESETS.get((provider or "").strip().lower())
+        preset = PROVIDER_PRESETS.get(normalized_provider)
         env_keys: list[str] = []
         if preset is not None and preset.api_key_env:
             env_keys.append(preset.api_key_env)
-        if "LLM_API_KEY" not in env_keys:
+        configured_provider = self._normalize_provider(
+            self._setting_default("TRANSLATION_PROVIDER")
+        )
+        if (
+            normalized_provider in {configured_provider, "custom"}
+            and "LLM_API_KEY" not in env_keys
+        ):
             env_keys.append("LLM_API_KEY")
 
         for env_key in env_keys:
@@ -121,12 +162,12 @@ class RuntimeConfigService:
                 return settings_value, "settings"
 
         candidate = (self.settings.LLM_API_KEY or "").strip()
-        if candidate:
+        if candidate and configured_provider == normalized_provider:
             return candidate, "settings"
         return "", "none"
 
     def _uses_explicit_api_key(self, payload: Dict[str, Any]) -> bool:
-        return "api_key" in payload and payload.get("api_key") is not None
+        return bool(str(payload.get("api_key") or "").strip())
 
     def _normalize_fallback_models(
         self,
@@ -197,20 +238,30 @@ class RuntimeConfigService:
         payload = payload or {}
         file_runtime = self._global_llm_payload()
         primary = file_runtime.get("primary") if isinstance(file_runtime.get("primary"), dict) else {}
-        provider = (
-            str(payload.get("provider") or primary.get("provider") or file_runtime.get("provider") or self._setting_default("TRANSLATION_PROVIDER") or "custom")
-            .strip()
-            .lower()
+        provider = self._normalize_provider(
+            payload.get("provider")
+            or primary.get("provider")
+            or file_runtime.get("provider")
+            or self._setting_default("TRANSLATION_PROVIDER")
         )
-        provider = "custom" if provider == "openai_compatible" else provider
 
         preset_base_url, preset_model = self._preset_defaults(provider)
         preset_format = self._preset_format(provider)
+        stored_profile = self._stored_provider_profiles().get(provider, {})
+        incoming_profiles = payload.get("provider_profiles")
+        incoming_profile = (
+            incoming_profiles.get(provider, {})
+            if isinstance(incoming_profiles, dict)
+            and isinstance(incoming_profiles.get(provider), dict)
+            else {}
+        )
+        profile = {**stored_profile, **self._public_profile(incoming_profile)}
         current_provider = self._current_provider()
         current_summary = llm_translation_service.get_runtime_summary() if current_provider == provider else {}
         file_matches_provider = str(primary.get("provider") or file_runtime.get("provider") or "").strip().lower() == provider
         api_format = str(
             payload.get("format")
+            or profile.get("format")
             or (primary.get("format") if file_matches_provider else "")
             or current_summary.get("format")
             or preset_format
@@ -218,6 +269,7 @@ class RuntimeConfigService:
 
         base_url = str(
             payload.get("base_url")
+            or profile.get("base_url")
             or (primary.get("base_url") if file_matches_provider else "")
             or current_summary.get("base_url")
             or preset_base_url
@@ -225,15 +277,20 @@ class RuntimeConfigService:
         ).strip().rstrip("/")
         model = str(
             payload.get("model")
+            or profile.get("model")
             or (primary.get("model") if file_matches_provider else "")
             or current_summary.get("model")
             or preset_model
             or self._setting_default("LLM_MODEL")
         ).strip()
-        api_key, api_key_source = self._resolve_api_key(provider, payload["api_key"] if "api_key" in payload else None)
+        api_key, api_key_source = self._resolve_api_key(
+            provider,
+            payload.get("api_key") if self._uses_explicit_api_key(payload) else None,
+        )
 
         timeout_seconds = int(
             payload.get("timeout_seconds")
+            or profile.get("timeout_seconds")
             or (primary.get("timeout_seconds") if file_matches_provider else 0)
             or self._setting_default("LLM_TIMEOUT_SECONDS")
         )
@@ -262,17 +319,22 @@ class RuntimeConfigService:
         ).strip()
         if "reasoning_enabled" in payload and payload.get("reasoning_enabled") is not None:
             reasoning_enabled = bool(payload.get("reasoning_enabled"))
+        elif "reasoning_enabled" in profile:
+            reasoning_enabled = bool(profile["reasoning_enabled"])
         elif file_matches_provider and ("reasoning_enabled" in primary or "reasoning_enabled" in file_runtime):
             reasoning_enabled = bool(primary.get("reasoning_enabled", file_runtime.get("reasoning_enabled")))
         else:
             reasoning_enabled = bool(current_summary.get("reasoning_enabled", self._setting_default("LLM_REASONING_ENABLED")))
         temperature = float(
             payload.get("temperature")
+            if payload.get("temperature") is not None
+            else profile.get("temperature")
             or (primary.get("temperature") if file_matches_provider else 0)
             or self._setting_default("LLM_TEMPERATURE")
         )
         max_tokens = int(
             payload.get("max_tokens")
+            or profile.get("max_tokens")
             or (primary.get("max_tokens") if file_matches_provider else 0)
             or self._setting_default("LLM_MAX_TOKENS")
         )
@@ -350,6 +412,7 @@ class RuntimeConfigService:
             "api_key": api_key,
             "api_key_source": api_key_source,
             "explicit_api_key": self._uses_explicit_api_key(payload),
+            "clear_api_key": bool(payload.get("clear_api_key", False)),
             "model": model,
             "system_prompt_mode": system_prompt_mode,
             "custom_system_prompt": custom_system_prompt,
@@ -369,26 +432,61 @@ class RuntimeConfigService:
             "system_prompt": system_prompt,
             "allow_demo_fallback": allow_demo_fallback,
             "fallback_models": fallback_models,
+            "provider_profiles": payload.get("provider_profiles"),
         }
         if "provider_api_keys" in payload:
             result["provider_api_keys"] = payload["provider_api_keys"]
         return result
 
     def get_public_runtime_summary(self) -> Dict[str, Any]:
-        runtime = llm_translation_service.get_runtime_summary()
+        runtime = dict(llm_translation_service.get_runtime_summary())
         api_key, key_source = self._resolve_api_key(runtime["provider"])
         runtime["masked_api_key"] = self.mask_api_key(api_key)
         runtime["api_key_source"] = key_source
         runtime["config_file"] = str(self.settings.get_runtime_config_path())
-
-        # Include provider-specific api keys from effective config (actual values for frontend editing)
-        effective_config = self._config_manager().get_effective_config()
-        effective_llm = effective_config.get("llm") if isinstance(effective_config, dict) else {}
-        provider_api_keys = effective_llm.get("provider_api_keys") if isinstance(effective_llm, dict) else {}
+        # Credentials are write-only. Return status metadata for every provider
+        # the UI can select, without returning any usable secret value.
+        provider_ids = set(PROVIDER_PRESETS)
+        provider_ids.update(self._stored_provider_profiles())
+        file_runtime = self._global_llm_payload()
+        provider_api_keys = file_runtime.get("provider_api_keys")
         if isinstance(provider_api_keys, dict):
-            runtime["provider_api_keys"] = {
-                k: v for k, v in provider_api_keys.items() if v
+            provider_ids.update(map(str, provider_api_keys))
+        runtime["provider_credentials"] = {
+            provider_id: {
+                "configured": bool(resolved_key),
+                "source": source,
+                "masked": self.mask_api_key(resolved_key),
             }
+            for provider_id in sorted(provider_ids)
+            for resolved_key, source in [self._resolve_api_key(provider_id)]
+        }
+
+        profiles: Dict[str, Dict[str, Any]] = {}
+        stored_profiles = self._stored_provider_profiles()
+        for provider_id in provider_ids:
+            preset = PROVIDER_PRESETS.get(provider_id)
+            profile: Dict[str, Any] = {
+                "format": preset.api_format if preset else "openai_compatible",
+                "base_url": preset.base_url if preset else "",
+                "model": preset.default_model if preset else "",
+            }
+            profile.update(stored_profiles.get(provider_id, {}))
+            profiles[provider_id] = self._public_profile(profile)
+        profiles[runtime["provider"]] = self._public_profile(
+            {
+                **profiles.get(runtime["provider"], {}),
+                "format": runtime.get("format"),
+                "base_url": runtime.get("base_url"),
+                "model": runtime.get("model"),
+                "timeout_seconds": runtime.get("timeout_seconds"),
+                "temperature": runtime.get("temperature"),
+                "max_tokens": runtime.get("max_tokens"),
+                "reasoning_enabled": runtime.get("reasoning_enabled"),
+            }
+        )
+        runtime["provider_profiles"] = profiles
+        runtime.pop("provider_api_keys", None)
         return runtime
 
     def _persist_runtime_config_file(self, values: Dict[str, Any]) -> Path:
@@ -411,8 +509,10 @@ class RuntimeConfigService:
         # Read provider_api_keys from file (values may not contain it if frontend didn't send)
         file_provider_api_keys = dict(file_runtime.get("provider_api_keys") or {})
 
-        if values.get("explicit_api_key"):
-            # User explicitly sent api_key (including empty string to clear)
+        if values.get("clear_api_key"):
+            primary_patch["api_key"] = ""
+            file_provider_api_keys[values["provider"]] = ""
+        elif values.get("explicit_api_key"):
             primary_patch["api_key"] = values["api_key"]
         elif values.get("api_key") and values.get("api_key_source") == "config":
             # Keep a resolved stored key when the form only changes non-secret
@@ -443,10 +543,39 @@ class RuntimeConfigService:
         }
         # Merge provider-specific api keys
         provider_api_keys = dict(values.get("provider_api_keys") or {})
+        provider_api_keys = {
+            **file_provider_api_keys,
+            **{
+                self._normalize_provider(provider_id): str(key or "").strip()
+                for provider_id, key in provider_api_keys.items()
+            },
+        }
         if values.get("explicit_api_key"):
             provider_api_keys[values["provider"]] = values["api_key"]
-        if provider_api_keys:
-            llm_patch["provider_api_keys"] = provider_api_keys
+        llm_patch["provider_api_keys"] = provider_api_keys
+
+        profiles = self._stored_provider_profiles()
+        incoming_profiles = values.get("provider_profiles")
+        if isinstance(incoming_profiles, dict):
+            profiles.update(
+                {
+                    self._normalize_provider(provider_id): self._public_profile(profile)
+                    for provider_id, profile in incoming_profiles.items()
+                    if isinstance(profile, dict)
+                }
+            )
+        profiles[values["provider"]] = self._public_profile(
+            {
+                "format": values["format"],
+                "base_url": values["base_url"],
+                "model": values["model"],
+                "timeout_seconds": values["timeout_seconds"],
+                "temperature": values["temperature"],
+                "max_tokens": values["max_tokens"],
+                "reasoning_enabled": values["reasoning_enabled"],
+            }
+        )
+        llm_patch["provider_profiles"] = profiles
         self._config_manager().update_global_config(
             {
                 "llm": llm_patch
@@ -631,145 +760,8 @@ class RuntimeConfigService:
             "config_file": str(config_path),
         }
 
-    def _test_openai_like(self, values: Dict[str, Any]) -> Dict[str, Any]:
-        headers = {"Content-Type": "application/json"}
-        if values["api_key"]:
-            headers["Authorization"] = f"Bearer {values['api_key']}"
-
-        # Try /models first (standard OpenAI compatible endpoint)
-        endpoint = f"{values['base_url']}/models"
-        response = requests.get(endpoint, headers=headers, timeout=values["timeout_seconds"])
-
-        # Fallback to /chat/completions for providers that don't support /models (e.g. MiniMax)
-        if response.status_code == 404:
-            endpoint = f"{values['base_url']}/chat/completions"
-            try:
-                response = requests.post(
-                    endpoint,
-                    headers=headers,
-                    json={
-                        "model": values["model"],
-                        "messages": [{"role": "user", "content": "hi"}],
-                        "max_tokens": 1,
-                    },
-                    timeout=values["timeout_seconds"],
-                )
-            except Exception:
-                pass
-
-        return {
-            "success": response.status_code == 200,
-            "reachable": response.status_code < 500,
-            "status_code": response.status_code,
-            "provider": values["provider"],
-            "format": values["format"],
-            "endpoint": endpoint,
-            "model": values["model"],
-            "message": "connection ok" if response.status_code == 200 else response.text[:300],
-        }
-
-    def _test_anthropic(self, values: Dict[str, Any]) -> Dict[str, Any]:
-        headers = {
-            "x-api-key": values["api_key"],
-            "anthropic-version": "2023-06-01",
-            "Content-Type": "application/json",
-        }
-
-        # Try /models first
-        endpoint = f"{values['base_url']}/models"
-        response = requests.get(endpoint, headers=headers, timeout=values["timeout_seconds"])
-
-        # Fallback to /messages for providers that don't support /models
-        if response.status_code == 404:
-            endpoint = f"{values['base_url']}/messages"
-            try:
-                response = requests.post(
-                    endpoint,
-                    headers=headers,
-                    json={
-                        "model": values["model"],
-                        "messages": [{"role": "user", "content": "hi"}],
-                        "max_tokens": 1,
-                    },
-                    timeout=values["timeout_seconds"],
-                )
-            except Exception:
-                pass
-
-        return {
-            "success": response.status_code == 200,
-            "reachable": response.status_code < 500,
-            "status_code": response.status_code,
-            "provider": values["provider"],
-            "format": values["format"],
-            "endpoint": endpoint,
-            "model": values["model"],
-            "message": "connection ok" if response.status_code == 200 else response.text[:300],
-        }
-
-    def _test_google(self, values: Dict[str, Any]) -> Dict[str, Any]:
-        # Try /models first
-        endpoint = f"{values['base_url']}/models"
-        response = requests.get(endpoint, params={"key": values["api_key"]}, timeout=values["timeout_seconds"])
-
-        # Fallback to direct model endpoint for providers that don't support /models
-        if response.status_code == 404:
-            endpoint = f"{values['base_url']}/models/{values['model']}:generateContent"
-            try:
-                response = requests.post(
-                    endpoint,
-                    params={"key": values["api_key"]},
-                    json={
-                        "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
-                    },
-                    timeout=values["timeout_seconds"],
-                )
-            except Exception:
-                pass
-
-        return {
-            "success": response.status_code == 200,
-            "reachable": response.status_code < 500,
-            "status_code": response.status_code,
-            "provider": values["provider"],
-            "format": values["format"],
-            "endpoint": endpoint,
-            "model": values["model"],
-            "message": "connection ok" if response.status_code == 200 else response.text[:300],
-        }
-
-    def _test_ollama(self, values: Dict[str, Any]) -> Dict[str, Any]:
-        endpoint = f"{values['base_url'].rstrip('/')}/api/tags"
-        headers = {"Content-Type": "application/json"}
-        if values["api_key"]:
-            headers["Authorization"] = f"Bearer {values['api_key']}"
-        response = requests.get(endpoint, headers=headers, timeout=values["timeout_seconds"])
-        return {
-            "success": response.status_code == 200,
-            "reachable": response.status_code < 500,
-            "status_code": response.status_code,
-            "provider": values["provider"],
-            "format": values["format"],
-            "endpoint": endpoint,
-            "model": values["model"],
-            "message": "connection ok" if response.status_code == 200 else response.text[:300],
-        }
-
     def test_connection(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         values = self._normalized_runtime(payload)
-        if not values["base_url"]:
-            raise ValueError("base_url is required")
-        if values["format"] not in {"ollama", "lmstudio"} and not values["api_key"]:
-            raise ValueError("api_key is required")
-        if values["format"] in {"openai_compatible", "lmstudio"}:
-            return self._test_openai_like(values)
-        if values["format"] == "anthropic":
-            return self._test_anthropic(values)
-        if values["format"] == "google":
-            return self._test_google(values)
-        if values["format"] == "ollama":
-            return self._test_ollama(values)
-        raise ValueError(f"Unsupported LLM format: {values['format']}")
-
+        return llm_translation_service.test_connection(values)
 
 runtime_config_service = RuntimeConfigService()

@@ -12,12 +12,23 @@ from typing import Dict, Any, List
 import structlog
 from pathlib import Path
 import json
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 from ..celery_app import celery_app, CADTask, update_progress
 from ..cad_processor import CADProcessor, CADProcessingError
 from ...database import SessionLocal, Project, ProjectFile, ProcessingTask
 
 logger = structlog.get_logger(__name__)
+
+
+def _run_async(coroutine):
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coroutine)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(asyncio.run, coroutine).result()
 
 @celery_app.task(bind=True, base=CADTask, name="cad_tasks.convert_dwg_to_dxf")
 def convert_dwg_to_dxf_task(self, project_id: int, file_id: int, dwg_file_path: str, output_dir: str) -> Dict[str, Any]:
@@ -47,14 +58,7 @@ def convert_dwg_to_dxf_task(self, project_id: int, file_id: int, dwg_file_path: 
         update_progress(task_id, 0.2, "开始DWG转换")
         
         # 执行转换 (这里需要在同步上下文中调用异步方法)
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        
-        result = loop.run_until_complete(
+        result = _run_async(
             processor.convert_dwg_to_dxf(dwg_file_path, output_dir)
         )
         
@@ -123,14 +127,7 @@ def extract_texts_from_dxf_task(self, project_id: int, file_id: int, dxf_file_pa
         update_progress(task_id, 0.2, "开始文本提取")
         
         # 执行提取
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        
-        result = loop.run_until_complete(
+        result = _run_async(
             processor.extract_texts_from_dxf(dxf_file_path, output_dir)
         )
         
@@ -210,21 +207,14 @@ def apply_translation_to_dxf_task(
         update_progress(task_id, 0.2, "开始应用翻译")
         
         # 执行翻译应用
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        
-        result = loop.run_until_complete(
+        result = _run_async(
             processor.apply_translation_to_dxf(
                 dxf_file_path,
                 excel_file_path,
                 output_dir,
                 config.get("font_name", "Times New Roman"),
                 config.get("translation_mode", "add"),
-                config.get("font_size_reduction", 4)
+                config.get("font_size_reduction", 2.0)
             )
         )
         
@@ -308,14 +298,7 @@ def process_project_batch_task(self, project_id: int, config: Dict[str, Any]) ->
         processor = CADProcessor()
         
         # 执行批量处理
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        
-        result = loop.run_until_complete(
+        result = _run_async(
             processor.process_project_files(project_id, file_paths, config)
         )
         

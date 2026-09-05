@@ -10,7 +10,14 @@ $ErrorActionPreference = "Stop"
 
 $rootPath = (Resolve-Path $Root).Path
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$outDir = Join-Path $rootPath $OutDirName
+$outDir = [System.IO.Path]::GetFullPath((Join-Path $rootPath $OutDirName))
+$workspacePrefix = $rootPath.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+if (-not $outDir.StartsWith($workspacePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Output directory must stay below the selected workspace."
+}
+if ($OutDirName.Trim('\', '/') -in @('backend', 'frontend', 'scripts', 'tools', 'docs', 'agent-harness', '.git')) {
+    throw "Output directory cannot replace maintained source."
+}
 $buildDir = Join-Path $outDir "_build"
 $runtimeStageDir = Join-Path $buildDir "runtime_stage"
 $payloadPath = Join-Path $outDir "runtime_payload.zip"
@@ -91,6 +98,8 @@ function Build-Frontend([string]$WorkspaceRoot) {
 
     Push-Location $frontendDir
     try {
+        & $npmCommand.Source ci
+        if ($LASTEXITCODE -ne 0) { throw "Frontend dependency installation failed." }
         & $npmCommand.Source run build
         if ($LASTEXITCODE -ne 0) {
             throw "Frontend build failed."
@@ -101,40 +110,6 @@ function Build-Frontend([string]$WorkspaceRoot) {
     }
 }
 
-function Sanitize-RuntimeConfig([string]$ConfigPath) {
-    if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
-        return
-    }
-
-    @'
-import json
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-data = json.loads(path.read_text(encoding="utf-8"))
-
-def scrub(obj):
-    if isinstance(obj, dict):
-        for key, value in list(obj.items()):
-            key_lower = key.lower()
-            if key_lower == "api_key" and isinstance(value, str):
-                obj[key] = ""
-            elif key_lower == "api_key_source":
-                obj[key] = "none"
-            elif key_lower == "api_key_configured":
-                obj[key] = False
-            else:
-                scrub(value)
-    elif isinstance(obj, list):
-        for item in obj:
-            scrub(item)
-
-scrub(data)
-path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-'@ | python - $ConfigPath
-}
-
 function Write-Stage2Readme([string]$DestinationPath) {
     @'
 # CAD Translation Portable EXE (Nuitka)
@@ -143,9 +118,8 @@ function Write-Stage2Readme([string]$DestinationPath) {
 
 - `launcher.exe` is the main user entrypoint.
 - Nuitka standalone dependencies are copied next to `launcher.exe`.
-- `runtime_payload.zip` is the sanitized delivery copy of backend, frontend, and tools.
-- `runtime/` is created on first launch from the payload.
-- `_build/` stores local Nuitka and staging caches and is not required for end-user delivery.
+- `runtime_payload.zip` is retained only when Nuitka is skipped; successful builds embed it next to the launcher.
+- The launcher keeps hashed code cache and durable user data under LocalAppData.
 
 This pipeline is separate from the stage-one `scale_release/` runtime package and from the legacy stage-two delivery chain.
 '@ | Set-Content -Encoding utf8 -LiteralPath $DestinationPath
@@ -213,30 +187,16 @@ if (-not (Test-Path -LiteralPath $launcherSource -PathType Leaf)) {
     throw "Nuitka launcher source not found at $launcherSource"
 }
 
-Copy-DirectoryContents -SourceDir $backendSource -DestinationDir (Join-Path $runtimeStageDir "backend") -ExcludePatterns @(
-    '(^|\\)__pycache__(\\|$)',
-    '(^|\\)\.pytest_cache(\\|$)',
-    '(^|\\)tests(\\|$)',
-    '(^|\\)outputs(\\|$)',
-    '(^|\\)uploads(\\|$)',
-    '(^|\\)temp(\\|$)',
-    '(^|\\)\.env$',
-    '(^|\\)\.env\.(?!example$)',
-    '\.db$',
-    '(^|\\)README_MODERN\.md$',
-    '(^|\\)test_.*\.py$',
-    '(^|\\)simple_test\.py$',
-    '(^|\\)setup_and_test\.py$',
-    '(^|\\)quick_start\.py$',
-    '(^|\\)run_celery\.py$'
-)
-Copy-DirectoryContents -SourceDir $frontendDistSource -DestinationDir (Join-Path $runtimeStageDir "frontend\dist")
-Copy-DirectoryContents -SourceDir $toolsSource -DestinationDir (Join-Path $runtimeStageDir "tools")
 
-$runtimeConfigPath = Join-Path $runtimeStageDir "backend\config\runtime_config.local.json"
-Sanitize-RuntimeConfig -ConfigPath $runtimeConfigPath
-
-Compress-Archive -Path (Join-Path $runtimeStageDir "*") -DestinationPath $payloadPath -Force
+$payloadPython = Get-Command python -ErrorAction SilentlyContinue
+if (-not $payloadPython) { $payloadPython = Get-Command py -ErrorAction SilentlyContinue }
+if (-not $payloadPython) { throw "Python was not found for payload assembly." }
+$payloadScript = Join-Path $repoRoot "scripts\build_exe_payload.py"
+$payloadArgs = @()
+if ($payloadPython.Name -eq "py.exe" -or $payloadPython.Name -eq "py") { $payloadArgs += "-3" }
+$payloadArgs += @($payloadScript, "--root", $rootPath, "--output", $payloadPath)
+& $payloadPython.Source @payloadArgs
+if ($LASTEXITCODE -ne 0) { throw "Canonical runtime payload assembly or audit failed." }
 
 if ($SkipNuitka) {
     Set-Content -LiteralPath (Join-Path $outDir "launcher.exe") -Value "placeholder launcher" -Encoding ascii
@@ -279,6 +239,7 @@ if ($SkipNuitka) {
     foreach ($item in $runtimeManifest.collect_data) {
         $nuitkaArgs += "--include-package-data=$item"
     }
+    foreach ($item in $runtimeManifest.exclude_modules) { $nuitkaArgs += "--nofollow-import-to=$item" }
     foreach ($item in $runtimeManifest.collect_all) {
         $nuitkaArgs += "--include-package=$item"
         $nuitkaArgs += "--include-package-data=$item"
@@ -295,5 +256,20 @@ if ($SkipNuitka) {
     Copy-DirectoryContents -SourceDir $nuitkaBundleDir -DestinationDir $outDir
 }
 
+Remove-IfExists $buildDir
 Write-Stage2Readme -DestinationPath (Join-Path $outDir "README.md")
+$releaseAuditScript = Join-Path $repoRoot "scripts\release_manifest.py"
+$auditArgs = @()
+if ($payloadPython.Name -eq "py.exe" -or $payloadPython.Name -eq "py") { $auditArgs += "-3" }
+$auditArgs += @($releaseAuditScript, "--directory", $outDir)
+& $payloadPython.Source @auditArgs
+if ($LASTEXITCODE -ne 0) { throw "Nuitka release directory audit failed." }
 Write-Host "Scale release EXE (Nuitka) generated: $outDir"
+
+if (-not $SkipNuitka) {
+    $smokeArgs = @()
+    if ($payloadPython.Name -eq "py.exe" -or $payloadPython.Name -eq "py") { $smokeArgs += "-3" }
+    $smokeArgs += @((Join-Path $repoRoot "scripts\smoke_release.py"), "--exe", (Join-Path $outDir "launcher.exe"))
+    & $payloadPython.Source @smokeArgs
+    if ($LASTEXITCODE -ne 0) { throw "Release startup/restart persistence smoke failed." }
+}

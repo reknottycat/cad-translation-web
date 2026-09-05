@@ -9,8 +9,18 @@ $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $rootPath = (Resolve-Path $Root).Path
-$outDir = Join-Path $rootPath $OutDirName
-$zipPath = Join-Path $rootPath $ZipName
+$outDir = [System.IO.Path]::GetFullPath((Join-Path $rootPath $OutDirName))
+$workspacePrefix = $rootPath.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+if (-not $outDir.StartsWith($workspacePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Output directory must stay below the selected workspace."
+}
+if ($OutDirName.Trim('\', '/') -in @('backend', 'frontend', 'scripts', 'tools', 'docs', 'agent-harness', '.git')) {
+    throw "Output directory cannot replace maintained source."
+}
+$zipPath = [System.IO.Path]::GetFullPath((Join-Path $rootPath $ZipName))
+if (-not $zipPath.StartsWith($workspacePrefix, [System.StringComparison]::OrdinalIgnoreCase) -or [System.IO.Path]::GetExtension($zipPath) -ne ".zip") {
+    throw "ZIP output must be a .zip file below the selected workspace."
+}
 
 function Remove-IfExists([string]$PathValue) {
     if (Test-Path -LiteralPath $PathValue) {
@@ -19,39 +29,9 @@ function Remove-IfExists([string]$PathValue) {
 }
 
 function Copy-DirectoryContents([string]$SourceDir, [string]$DestinationDir, [string[]]$ExcludePatterns = @()) {
-    if (-not (Test-Path -LiteralPath $SourceDir -PathType Container)) {
-        return
-    }
-
-    Get-ChildItem -LiteralPath $SourceDir -Recurse -Force | ForEach-Object {
-        $item = $_
-        # Relative path under $SourceDir.  Keep the raw separator form for the
-        # destination path but match exclusions against a copy normalized to '/'
-        # so rules behave identically on Windows ('\') and Unix ('/') and never
-        # depend on a drive/separator quirk (release-gate probe: exclusion must
-        # hold on the Windows OneDrive workspace AND on cross-platform CI).
-        $rawRelative = $item.FullName.Substring($SourceDir.Length).TrimStart('\', '/')
-        if ([string]::IsNullOrWhiteSpace($rawRelative)) {
-            return
-        }
-        $matchRelative = $rawRelative.Replace('\', '/')
-
-        foreach ($pattern in $ExcludePatterns) {
-            if ($matchRelative -match $pattern) {
-                return
-            }
-        }
-
-        $target = Join-Path $DestinationDir $rawRelative
-        if ($item.PSIsContainer) {
-            New-Item -ItemType Directory -Force $target | Out-Null
-            return
-        }
-
-        $targetDir = Split-Path $target -Parent
-        New-Item -ItemType Directory -Force $targetDir | Out-Null
-        Copy-Item -LiteralPath $item.FullName -Destination $target -Force
-    }
+    $targetName = $DestinationDir.Substring($outDir.Length).TrimStart('\', '/').Replace('\', '/')
+    & $releasePython.Source @releasePythonPrefix $releaseManifest --copy-tree $SourceDir --stage $outDir --target-name $targetName
+    if ($LASTEXITCODE -ne 0) { throw "Release tree assembly failed: $targetName" }
 }
 
 function Build-Frontend([string]$WorkspaceRoot) {
@@ -78,6 +58,8 @@ function Build-Frontend([string]$WorkspaceRoot) {
     Write-Host "Building frontend dist..."
     Push-Location $frontendDir
     try {
+        & $npmCommand.Source ci
+        if ($LASTEXITCODE -ne 0) { throw "Frontend dependency installation failed." }
         & $npmCommand.Source run build
         if ($LASTEXITCODE -ne 0) {
             throw "Frontend build failed."
@@ -277,6 +259,13 @@ echo cad-translate installed. Run "cad-translate --help".
 endlocal
 '@ | Set-Content -Encoding ascii -LiteralPath $DestinationPath
 }
+$releaseManifest = Join-Path $PSScriptRoot "release_manifest.py"
+if (-not (Test-Path -LiteralPath $releaseManifest -PathType Leaf)) { throw "Missing canonical release manifest: $releaseManifest" }
+$releasePython = Get-Command python -ErrorAction SilentlyContinue
+if (-not $releasePython) { $releasePython = Get-Command py -ErrorAction SilentlyContinue }
+if (-not $releasePython) { throw "Python is required for canonical release assembly." }
+$releasePythonPrefix = @()
+if ($releasePython.Name -eq "py.exe" -or $releasePython.Name -eq "py") { $releasePythonPrefix += "-3" }
 Remove-IfExists $outDir
 Remove-IfExists $zipPath
 New-Item -ItemType Directory -Force $outDir | Out-Null
@@ -296,49 +285,17 @@ if (-not (Test-Path -LiteralPath $frontendDistSource -PathType Container)) {
     throw "frontend/dist directory not found at $frontendDistSource"
 }
 
-# ---------------------------------------------------------------------------
-# Release-gate exclusion rules (Issue #14 acceptance): the delivered package
-# must NOT carry dev-only content -- virtual envs, byte caches, logs, test
-# dirs/scripts, databases or local config/secrets.  Each pattern is applied to
-# a '/' -normalized relative path (see Copy-DirectoryContents) so it holds
-# identically on the Windows OneDrive probe workspace and on cross-platform CI.
-# Naming a directory segment prunes its whole subtree (a .venv is not descended).
-# ---------------------------------------------------------------------------
-$ReleaseExcludes = @(
-    # Virtual environments (any depth / any common name).
-    '(^|/)(\.venv|venv|env|ENV)(/|$)',
-    # Byte-compiled caches and pickled helpers.
-    '(^|/)__pycache__(/|$)',
-    '(^|/)\.pytest_cache(/|$)',
-    '(^|/)\.mypy_cache(/|$)',
-    '(^|/)\.ruff_cache(/|$)',
-    '\.pyc$',
-    # Test directories and ad-hoc test scripts (any depth).
-    '(^|/)(tests|test|testing)(/|$)',
-    '(^|/)test_.*\.py$',
-    '(^|/)conftest\.py$',
-    # Dev databases and local config / secrets.
-    '(^|/)\.env$',
-    '(^|/)\.env\.(?!example$)',
-    '(^|/)runtime_config\.local\.json$',
-    '(^|/)local_settings\.py$',
-    '(^|/)db\.sqlite3$',
-    '\.(db|sqlite3?)$',
-    # Runtime logs from local backend/CLI runs (probe: server*.log / *.stdout.log).
-    '\.log$',
-    # Local generated scratch/output dirs.
-    '(^|/)(outputs|uploads|temp|logs)(/|$)',
-    # Python packaging leftovers that should never ship.
-    '(^|/)build(/|$)',
-    '(^|/)dist(/|$)',
-    '(^|/)\.egg-info(/|$)',
-    # Misc files not meant for delivery.
-    '(^|/)README_MODERN\.md$',
-    '(^|/)simple_test\.py$',
-    '(^|/)setup_and_test\.py$',
-    '(^|/)quick_start\.py$',
-    '(^|/)run_celery\.py$'
-)
+$ReleaseExcludes = @()
+function Invoke-ReleaseAudit([string]$DirectoryPath, [string]$ArchivePath = "", [switch]$WriteToolsManifest) {
+    $auditArguments = @($releaseManifest, "--directory", $DirectoryPath)
+    if ($WriteToolsManifest) { $auditArguments += "--write-tools-manifest" }
+    & $releasePython.Source @releasePythonPrefix @auditArguments
+    if ($LASTEXITCODE -ne 0) { throw "Release directory audit failed." }
+    if ($ArchivePath) {
+        & $releasePython.Source @releasePythonPrefix $releaseManifest --archive $ArchivePath
+        if ($LASTEXITCODE -ne 0) { throw "Release archive audit failed." }
+    }
+}
 
 Copy-DirectoryContents -SourceDir $backendSource -DestinationDir (Join-Path $outDir "backend") -ExcludePatterns $ReleaseExcludes
 
@@ -385,12 +342,16 @@ Write-CliLauncher -DestinationPath (Join-Path $outDir "cad-cli.bat")
 Write-CliInstallBat -DestinationPath (Join-Path $outDir "install_cli.bat")
 Write-CliReadme -DestinationPath (Join-Path $outDir "CLI.md")
 
+Invoke-ReleaseAudit -DirectoryPath $outDir -WriteToolsManifest
+
 [System.IO.Compression.ZipFile]::CreateFromDirectory(
     $outDir,
     $zipPath,
     [System.IO.Compression.CompressionLevel]::Optimal,
     $false
 )
+
+Invoke-ReleaseAudit -DirectoryPath $outDir -ArchivePath $zipPath
 
 Write-Host "Scale release generated: $outDir"
 Write-Host "Zip package generated: $zipPath"

@@ -5,15 +5,18 @@ CAD文件翻译处理Web系统 - 数据库配置
 Database Configuration for CAD File Translation Web System
 """
 
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, Boolean, Float, ForeignKey
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session, relationship
+from sqlalchemy import (
+    create_engine, Column, Integer, String, DateTime, Text, Boolean, Float,
+    ForeignKey, UniqueConstraint, inspect, text,
+)
+from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 from sqlalchemy.sql import func
 from datetime import datetime
 from typing import Generator
 import structlog
 
 from .config import get_settings
+from .utils.locking import file_lock
 
 logger = structlog.get_logger(__name__)
 settings = get_settings()
@@ -57,7 +60,7 @@ class Project(Base):
     source_language = Column(String(10), default="zh")
     target_language = Column(String(10), default="en")
     font_name = Column(String(100), default="Times New Roman")
-    font_size_reduction = Column(Integer, default=4)
+    font_size_reduction = Column(Float, default=2.0)
     translation_mode = Column(String(20), default="add")  # add, replace
 
     # 统计信息
@@ -74,6 +77,11 @@ class Project(Base):
 class ProjectFile(Base):
     """项目文件模型"""
     __tablename__ = "project_files"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id", "content_hash", name="uq_project_files_project_hash"
+        ),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
@@ -82,6 +90,7 @@ class ProjectFile(Base):
     file_path = Column(String(500), nullable=False)
     file_size = Column(Integer, nullable=False)
     file_type = Column(String(10), nullable=False)  # dwg, dxf
+    content_hash = Column(String(64), nullable=True, index=True)
     status = Column(String(50), default="uploaded")  # uploaded, converting, converted, extracting, extracted, translating, translated, failed
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
@@ -176,7 +185,32 @@ def init_db():
     """初始化数据库"""
     logger.info("初始化数据库表")
     Base.metadata.create_all(bind=engine)
+    _ensure_legacy_hash_column()
     logger.info("数据库表创建完成")
+
+
+def _ensure_legacy_hash_column() -> None:
+    """Add content-hash deduplication to existing SQLite databases."""
+    if engine.dialect.name != "sqlite":
+        return
+    schema_lock = settings.get_temp_path() / "database-schema"
+    with file_lock(schema_lock):
+        columns = {
+            column["name"]
+            for column in inspect(engine).get_columns("project_files")
+        }
+        with engine.begin() as connection:
+            if "content_hash" not in columns:
+                connection.execute(
+                    text("ALTER TABLE project_files ADD COLUMN content_hash VARCHAR(64)")
+                )
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_project_files_project_hash "
+                    "ON project_files (project_id, content_hash) "
+                    "WHERE content_hash IS NOT NULL"
+                )
+            )
 
 
 # 数据库健康检查

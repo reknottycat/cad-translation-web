@@ -40,7 +40,7 @@ main:
           # 仓库当前无测试文件时自动跳过，存在 tests/ 时执行 pytest
           script: |
             if find . -path ./node_modules -prune -o -name "test_*.py" -print -quit | grep -q .; then
-              python -m pytest -q || exit 1
+              PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest tests -q || exit 1
             else
               echo "no test files found, skipping pytest"
             fi
@@ -49,9 +49,10 @@ main:
         image: node:20
       stages:
         - name: install-deps
+          image: node:20
           script: |
             cd frontend
-            npm install
+            npm ci
         - name: lint
           script: |
             cd frontend
@@ -77,7 +78,7 @@ main:
         - name: run-tests
           script: |
             if find . -path ./node_modules -prune -o -name "test_*.py" -print -quit | grep -q .; then
-              python -m pytest -q || exit 1
+              PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest tests -q || exit 1
             else
               echo "no test files found, skipping pytest"
             fi
@@ -86,9 +87,10 @@ main:
         image: node:20
       stages:
         - name: install-deps
+          image: node:20
           script: |
             cd frontend
-            npm install
+            npm ci
         - name: lint
           script: |
             cd frontend
@@ -112,7 +114,7 @@ main:
           script: |
             set -e
             cd frontend
-            npm install
+            npm ci
             npm run build
         - name: assemble-exe-payload
           # 组装 PyInstaller 打包所需的 runtime_payload.zip
@@ -136,6 +138,7 @@ main:
             fi
             echo "== [wine] running pyinstaller =="
             python release_exe/run_pyinstaller.py runtime_payload.zip
+            python scripts/smoke_release.py --exe dist/launcher/launcher.exe
             ls -la dist/launcher | head -20
         - name: package-release
           # 产出两个交付物：
@@ -143,6 +146,7 @@ main:
           #   2) cad-translation-release-<tag>.tar.gz       跨平台源码交付包
           script: |
             set -e
+            python scripts/release_manifest.py --validate-tag "$RELEASE_VERSION"
             VERSION_SAFE="$(printf '%s' "$RELEASE_VERSION" | tr '/' '-')"
             EXE_ZIP="$CNB_BUILD_WORKSPACE/cad-translation-web-${VERSION_SAFE}-windows-exe.zip"
 
@@ -153,7 +157,7 @@ main:
 
             - `launcher.exe` 是主入口，双击运行。
             - `_internal/` 包含 PyInstaller 收集的 Python 运行时与依赖库。
-            - 首次启动会把内嵌的 runtime_payload.zip 解压到临时目录并启动本地服务，
+            - 代码按 payload 哈希缓存在 LocalAppData，任务和配置持久保存在独立 data 目录；
               随后自动打开浏览器；关闭窗口即退出。
 
             本包独立于第一阶段的 `scale_release/` 运行时包（后者依赖本地 CAD 软件 COM，
@@ -173,22 +177,9 @@ main:
                         zf.write(path, os.path.relpath(path, root))
             print("packed exe bundle:", out, os.path.getsize(out), "bytes")
             PY_ZIP
+            python scripts/release_manifest.py --archive "$EXE_ZIP"
 
-            ROOT="$RELEASE_ROOT"
-            mkdir -p "$ROOT/backend" "$ROOT/frontend/dist" "$ROOT/docs/modern" "$ROOT/tools"
-            # 复制后端源码（排除开发/缓存/密钥文件），用 tar 流式过滤避免依赖 rsync
-            tar -cf - \
-              --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
-              --exclude='.env' --exclude='.env.*' --exclude='*.db' --exclude='runtime_config.local.json' \
-              --exclude='outputs' --exclude='uploads' --exclude='temp' \
-              -C backend . | tar -xf - -C "$ROOT/backend"
-            cp -r frontend/dist/. "$ROOT/frontend/dist/"
-            cp -r docs/modern/. "$ROOT/docs/modern/"
-            cp requirements.txt "$ROOT/requirements.txt"
-            echo "CAD Translation Web Release $RELEASE_VERSION" > "$ROOT/README.md"
-            echo "Windows portable exe is attached as cad-translation-web-${VERSION_SAFE}-windows-exe.zip." >> "$ROOT/README.md"
-            cd "$CNB_BUILD_WORKSPACE"
-            tar -czf "cad-translation-release-${VERSION_SAFE}.tar.gz" -C release_out .
+            python scripts/build_source_bundle.py --root "$CNB_BUILD_WORKSPACE" --output "cad-translation-release-${VERSION_SAFE}.tar.gz"
             ls -lh "$EXE_ZIP" "cad-translation-release-${VERSION_SAFE}.tar.gz"
         - name: create-release
           type: git:release
@@ -201,84 +192,65 @@ main:
 
             变更说明见 CHANGELOG（如存在）与 docs/modern/RELEASE_SCALE.md。"
         - name: upload-assets
-          # 把 EXE zip 与源码交付包挂为该 Tag Release 的附件（尽力而为）
+          # 把 EXE zip 与源码交付包挂为该 Tag Release 的附件（任一失败均阻塞流水线）
           script: |
             set -e
             VERSION_SAFE="$(printf '%s' "$RELEASE_VERSION" | tr '/' '-')"
             EXE_ZIP="$CNB_BUILD_WORKSPACE/cad-translation-web-${VERSION_SAFE}-windows-exe.zip"
             SRC_TGZ="$CNB_BUILD_WORKSPACE/cad-translation-release-${VERSION_SAFE}.tar.gz"
             REPO="$CNB_GROUP_SLUG/$CNB_REPO_NAME"
-            python scripts/upload_artifact.py --tag "$RELEASE_VERSION" --repo "$REPO" --file "$EXE_ZIP" \
-              || echo "EXE upload skipped (Release may not be ready yet)"
-            python scripts/upload_artifact.py --tag "$RELEASE_VERSION" --repo "$REPO" --file "$SRC_TGZ" \
-              || echo "source upload skipped"
+            python scripts/upload_artifact.py --tag "$RELEASE_VERSION" --repo "$REPO" --file "$EXE_ZIP"
+            python scripts/upload_artifact.py --tag "$RELEASE_VERSION" --repo "$REPO" --file "$SRC_TGZ"
 
   # 手动触发：仅打包（不发布 Release）
   web_trigger_pack:
     - name: manual-pack
       docker:
-        image: node:20
+        image: python:3.11
       env:
         RELEASE_VERSION: manual
         RELEASE_ROOT: $CNB_BUILD_WORKSPACE/release_out
       stages:
         - name: install-deps
+          image: node:20
           script: |
             cd frontend
-            npm install
+            npm ci
         - name: build-frontend
+          image: node:20
           script: |
             cd frontend
             npm run build
         - name: package-release
           script: |
             set -e
-            ROOT="$RELEASE_ROOT"
-            mkdir -p "$ROOT/backend" "$ROOT/frontend/dist" "$ROOT/docs/modern" "$ROOT/tools"
-            tar -cf - \
-              --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
-              --exclude='.env' --exclude='.env.*' --exclude='*.db' --exclude='runtime_config.local.json' \
-              --exclude='outputs' --exclude='uploads' --exclude='temp' \
-              -C backend . | tar -xf - -C "$ROOT/backend"
-            cp -r frontend/dist/. "$ROOT/frontend/dist/"
-            cp -r docs/modern/. "$ROOT/docs/modern/"
-            cp requirements.txt "$ROOT/requirements.txt"
-            cd "$CNB_BUILD_WORKSPACE"
-            tar -czf "cad-translation-release-manual.tar.gz" -C release_out .
+            python scripts/build_source_bundle.py --root "$CNB_BUILD_WORKSPACE" --output "cad-translation-release-manual.tar.gz"
             ls -lh "cad-translation-release-manual.tar.gz"
 
   # 手动触发：打包并发布 Release（按当前分支）
   web_trigger_release:
     - name: manual-release
       docker:
-        image: node:20
+        image: python:3.11
       env:
         RELEASE_VERSION: $CNB_BRANCH
         RELEASE_ROOT: $CNB_BUILD_WORKSPACE/release_out
       stages:
         - name: install-deps
+          image: node:20
           script: |
             cd frontend
-            npm install
+            npm ci
         - name: build-frontend
+          image: node:20
           script: |
             cd frontend
             npm run build
         - name: package-release
           script: |
             set -e
-            ROOT="$RELEASE_ROOT"
-            mkdir -p "$ROOT/backend" "$ROOT/frontend/dist" "$ROOT/docs/modern" "$ROOT/tools"
-            tar -cf - \
-              --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
-              --exclude='.env' --exclude='.env.*' --exclude='*.db' --exclude='runtime_config.local.json' \
-              --exclude='outputs' --exclude='uploads' --exclude='temp' \
-              -C backend . | tar -xf - -C "$ROOT/backend"
-            cp -r frontend/dist/. "$ROOT/frontend/dist/"
-            cp -r docs/modern/. "$ROOT/docs/modern/"
-            cp requirements.txt "$ROOT/requirements.txt"
-            cd "$CNB_BUILD_WORKSPACE"
-            tar -czf "cad-translation-release-$RELEASE_VERSION.tar.gz" -C release_out .
+            python scripts/release_manifest.py --validate-tag "$RELEASE_VERSION"
+            python scripts/build_source_bundle.py --root "$CNB_BUILD_WORKSPACE" --output "cad-translation-release-$RELEASE_VERSION.tar.gz"
             ls -lh "cad-translation-release-$RELEASE_VERSION.tar.gz"
         - name: create-release
           type: git:release
@@ -298,7 +270,7 @@ main:
           script: |
             set -e
             cd frontend
-            npm install
+            npm ci
             npm run build
         - name: assemble-exe-payload
           script: |
@@ -317,6 +289,7 @@ main:
               pip install -r /tmp/req-nowin.txt email_validator
             fi
             python release_exe/run_pyinstaller.py runtime_payload.zip
+            python scripts/smoke_release.py --exe dist/launcher/launcher.exe
             ls -la dist/launcher | head -20
         - name: package-exe
           script: |
@@ -330,7 +303,7 @@ main:
 
             - `launcher.exe` 是主入口，双击运行。
             - `_internal/` 包含 PyInstaller 收集的 Python 运行时与依赖库。
-            - 首次启动会把内嵌的 runtime_payload.zip 解压到临时目录并启动本地服务，
+            - 代码按 payload 哈希缓存在 LocalAppData，任务和配置持久保存在独立 data 目录；
               随后自动打开浏览器；关闭窗口即退出。
             EXE_README
             python - "$EXE_ZIP" <<'PY_ZIP'
@@ -347,16 +320,16 @@ main:
                         zf.write(path, os.path.relpath(path, root))
             print("packed exe bundle:", out, os.path.getsize(out), "bytes")
             PY_ZIP
+            python scripts/release_manifest.py --archive "$EXE_ZIP"
             ls -lh "$EXE_ZIP"
             echo "$EXE_ZIP" > exe_artifact_path.txt
         - name: upload-asset
-          # 尽力上传到与当前分支/Tag 同名的 Release；不存在则跳过
+          # 上传到对应版本的 Release；不存在或确认失败则阻塞流水线
           script: |
             set -e
             EXE_ZIP="$(cat exe_artifact_path.txt)"
             REPO="$CNB_GROUP_SLUG/$CNB_REPO_NAME"
-            python scripts/upload_artifact.py --tag "$CNB_BRANCH" --repo "$REPO" --file "$EXE_ZIP" || \
-              echo "no Release matches '$CNB_BRANCH'; skip upload (artifact: $EXE_ZIP)"
+            python scripts/upload_artifact.py --tag "$CNB_BRANCH" --repo "$REPO" --file "$EXE_ZIP"
 
   # API 触发：云端交叉打包 Windows EXE（供自动化/脚本调用，效果同 web_trigger_exe）
   api_trigger_exe:
@@ -369,7 +342,7 @@ main:
           script: |
             set -e
             cd frontend
-            npm install
+            npm ci
             npm run build
         - name: assemble-exe-payload
           script: |
@@ -388,6 +361,7 @@ main:
               pip install -r /tmp/req-nowin.txt email_validator
             fi
             python release_exe/run_pyinstaller.py runtime_payload.zip
+            python scripts/smoke_release.py --exe dist/launcher/launcher.exe
             ls -la dist/launcher | head -20
         - name: package-exe
           script: |
@@ -401,7 +375,7 @@ main:
 
             - `launcher.exe` 是主入口，双击运行。
             - `_internal/` 包含 PyInstaller 收集的 Python 运行时与依赖库。
-            - 首次启动会把内嵌的 runtime_payload.zip 解压到临时目录并启动本地服务，
+            - 代码按 payload 哈希缓存在 LocalAppData，任务和配置持久保存在独立 data 目录；
               随后自动打开浏览器；关闭窗口即退出。
             EXE_README
             python - "$EXE_ZIP" <<'PY_ZIP'
@@ -418,6 +392,7 @@ main:
                         zf.write(path, os.path.relpath(path, root))
             print("packed exe bundle:", out, os.path.getsize(out), "bytes")
             PY_ZIP
+            python scripts/release_manifest.py --archive "$EXE_ZIP"
             ls -lh "$EXE_ZIP"
             echo "$EXE_ZIP" > exe_artifact_path.txt
         - name: upload-asset
@@ -425,8 +400,7 @@ main:
             set -e
             EXE_ZIP="$(cat exe_artifact_path.txt)"
             REPO="$CNB_GROUP_SLUG/$CNB_REPO_NAME"
-            python scripts/upload_artifact.py --tag "$CNB_BRANCH" --repo "$REPO" --file "$EXE_ZIP" || \
-              echo "no Release matches '$CNB_BRANCH'; skip upload (artifact: $EXE_ZIP)"
+            python scripts/upload_artifact.py --tag "$CNB_BRANCH" --repo "$REPO" --file "$EXE_ZIP"
 
   # 未知分支推送：基础语法校验
   push:

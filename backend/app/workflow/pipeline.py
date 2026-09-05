@@ -32,7 +32,7 @@ _WORKFLOW_FILE = Path(__file__).resolve().parents[4] / ".agents" / "workflows" /
 class CADPipeline:
     """
     CAD 翻译管道编排器
-    
+
     将 WorkflowRunner 与四个功能模块绑定，并提供高层 run() 接口。
     """
 
@@ -122,7 +122,7 @@ class CADPipeline:
         font_name = ctx.get("font_name", "Times New Roman")
         font_size_reduction = ctx.get("font_size_reduction", 2)
 
-        if not translation_map:
+        if not translation_map and not ctx.get("entity_translations"):
             raise ValueError("翻译映射表为空，无法执行回填。")
 
         output_file = task_dir / f"translated_{Path(dxf_file).name}"
@@ -133,6 +133,7 @@ class CADPipeline:
             translation_mode=translation_mode,
             font_name=font_name,
             font_size_reduction=font_size_reduction,
+            entity_translations=ctx.get("entity_translations"),
         )
         return {
             "output_file": result["output_file"],
@@ -175,6 +176,7 @@ class CADPipeline:
         translation_mode: str = "replace",
         font_name: str = "Times New Roman",
         font_size_reduction: int = 2,
+        entity_translations: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """
         仅执行回填步骤（用于用户手动翻译完 Excel 后调用）。
@@ -189,6 +191,7 @@ class CADPipeline:
             "translation_mode": translation_mode,
             "font_name": font_name,
             "font_size_reduction": font_size_reduction,
+            "entity_translations": entity_translations,
         }
         return self._handle_apply(ctx)
 
