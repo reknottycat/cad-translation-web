@@ -65,6 +65,11 @@ COLLECT_SUBMODULES: List[str] = [
     "multipart",
     "email_validator",
     "anyio",
+    # 后端运行期直接 import，但源码在 runtime_payload.zip 内，
+    # PyInstaller 只能看到入口 launcher.py（仅 import uvicorn），
+    # 因此这两个纯 Python 包必须显式收集，否则启动报 ModuleNotFoundError。
+    "aiofiles",
+    "requests",
 ]
 
 # 需要把包内的数据文件一并收集的包

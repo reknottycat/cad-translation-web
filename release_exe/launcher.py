@@ -119,6 +119,9 @@ def _write_env_file(env_path: Path, port: int) -> None:
         f"PORT={port}",
         "HOST=127.0.0.1",
         "ASYNC_TASKS_MODE=local",
+        # 便携 exe 只绑定 127.0.0.1，属可信单用户部署，关闭管理员防护，
+        # 否则默认 fail-closed 会让所有受保护接口返回 503。
+        "ENABLE_ADMIN_GUARD=false",
     ]
     try:
         env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -139,6 +142,7 @@ def _run_uvicorn(app_dir: Path, port: int) -> None:
     os.environ.setdefault("HOST", "127.0.0.1")
     os.environ.setdefault("PORT", str(port))
     os.environ.setdefault("ASYNC_TASKS_MODE", "local")
+    os.environ.setdefault("ENABLE_ADMIN_GUARD", "false")
 
     uvicorn.run(
         "app.main:app",
