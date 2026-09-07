@@ -5,6 +5,10 @@ A web-based CAD drawing translation system. It extracts text from DWG/DXF drawin
 This repository contains the Web application (FastAPI backend + React frontend)
 and the maintained `cad-translate` CLI.
 
+Project website: [reknottycat.github.io/cad-translation-web](https://reknottycat.github.io/cad-translation-web/).
+Its dependency-free source lives in [`website/`](website/) and is deployed to
+GitHub Pages by [the Pages workflow](.github/workflows/deploy-pages.yml).
+
 Architecture, model configuration, performance, and Windows delivery findings:
 [2026-09-05 audit report](docs/modern/AUDIT_2026-09-05.md) (commit-scoped review).
 Current behavior and module boundaries: [architecture](docs/modern/ARCHITECTURE.md).

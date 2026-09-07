@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="CAD Translation System：从 DWG/DXF 转换、文字提取、LLM 批量翻译到图纸回填的一体化开源 CAD 翻译系统。"
+    />
+    <meta name="theme-color" content="#071827" />
+    <meta property="og:type" content="website" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:title" content="CAD Translation System｜让工程图纸直接说另一种语言" />
+    <meta
+      property="og:description"
+      content="保留图纸结构，批量提取、翻译并回填 DWG/DXF 中的工程文字。"
+    />
+    <meta property="og:url" content="https://reknottycat.github.io/cad-translation-web/" />
+    <link rel="canonical" href="https://reknottycat.github.io/cad-translation-web/" />
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="./styles.css" />
+    <title>CAD Translation System｜工程图纸智能翻译</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">跳到主要内容</a>
+
+    <header class="site-header" data-header>
+      <a class="brand" href="#top" aria-label="CAD Translation System 首页">
+        <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
+          <path d="M4.5 9.5h31v21h-31z" />
+          <path d="M12 30.5v5M28 30.5v5M8 35.5h24M13 15h14M13 20h9M13 25h12" />
+          <circle cx="29" cy="12" r="2.5" />
+        </svg>
+        <span>
+          <b>CAD Translation</b>
+          <small>ENGINEERING LANGUAGE LAYER</small>
+        </span>
+      </a>
+
+      <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="site-nav">
+        <span></span><span></span>
+        <span class="sr-only">打开导航</span>
+      </button>
+
+      <nav class="site-nav" id="site-nav" aria-label="主导航">
+        <a href="#workflow">工作流</a>
+        <a href="#capabilities">核心能力</a>
+        <a href="#deploy">部署</a>
+        <a
+          class="nav-github"
+          href="https://github.com/reknottycat/cad-translation-web"
+          target="_blank"
+          rel="noreferrer"
+        >
+          GitHub <span aria-hidden="true">↗</span>
+        </a>
+      </nav>
+    </header>
+
+    <main id="main">
+      <section class="hero" id="top">
+        <div class="hero-noise" aria-hidden="true"></div>
+        <div class="hero-copy" data-reveal>
+          <div class="eyebrow">
+            <span class="status-dot"></span>
+            OPEN SOURCE · MIT · V2.1.0
+          </div>
+          <h1>
+            让工程图纸<br />
+            <span>直接说另一种语言</span>
+          </h1>
+          <p class="hero-lead">
+            从 DWG/DXF 转换、文字实体提取、LLM 批量翻译，到译文精准回填。
+            一条流水线完成整张图纸的语言迁移，同时保留可继续编辑的 CAD 结构。
+          </p>
+          <div class="hero-actions">
+            <a
+              class="button button-primary"
+              href="https://github.com/reknottycat/cad-translation-web"
+              target="_blank"
+              rel="noreferrer"
+            >
+              <span>获取开源项目</span>
+              <span aria-hidden="true">↗</span>
+            </a>
+            <a class="button button-ghost" href="#workflow">查看处理流程</a>
+          </div>
+          <dl class="hero-facts" aria-label="项目概要">
+            <div><dt>INPUT</dt><dd>DWG / DXF</dd></div>
+            <div><dt>TRANSLATION</dt><dd>10+ LLM 预设</dd></div>
+            <div><dt>RUNTIME</dt><dd>Web / CLI / EXE</dd></div>
+          </dl>
+        </div>
+
+        <div class="blueprint-demo" data-blueprint data-reveal>
+          <div class="drawing-head">
+            <span>DWG · A-03 · FLOOR PLAN</span>
+            <span class="drawing-coordinates">X 128.40&nbsp;&nbsp;Y 072.16</span>
+          </div>
+
+          <div class="drawing-stage">
+            <svg class="drawing-lines" viewBox="0 0 760 560" role="img" aria-label="工程图纸线框示意">
+              <g class="plan-thin">
+                <path d="M56 70H700V488H56zM92 106H664V452H92z" />
+                <path d="M92 220H664M92 348H664M260 106V452M472 106V452" />
+                <path d="M260 180h44v40M472 306h-52v42M620 220v48h44" />
+                <path d="M123 106v35m-12 0h24M414 348v46m-13 0h26" />
+                <circle cx="366" cy="277" r="39" /><circle cx="366" cy="277" r="4" />
+                <path d="M327 277h78M366 238v78" />
+              </g>
+              <g class="plan-heavy">
+                <path d="M92 106H664M92 452H664M92 106V452M664 106V452" />
+                <path d="M260 106v74m0 40v128m0 46v58M472 106v200m0 42v104" />
+              </g>
+              <g class="dimension-lines">
+                <path d="M92 84V58M664 84V58M92 66H664M103 61l-11 5 11 5M653 61l11 5-11 5" />
+                <path d="M72 106H44M72 452H44M52 106V452M47 117l5-11 5 11M47 441l5 11 5-11" />
+                <text x="347" y="57">5720</text><text x="40" y="290" transform="rotate(-90 40 290)">3460</text>
+              </g>
+              <g class="axis-labels">
+                <circle cx="92" cy="502" r="13" /><text x="88" y="507">A</text>
+                <circle cx="260" cy="502" r="13" /><text x="256" y="507">B</text>
+                <circle cx="472" cy="502" r="13" /><text x="468" y="507">C</text>
+                <circle cx="664" cy="502" r="13" /><text x="660" y="507">D</text>
+              </g>
+            </svg>
+
+            <div class="drawing-copy drawing-original" aria-hidden="true">
+              <span style="--x: 15%; --y: 27%">会议室</span>
+              <span style="--x: 46%; --y: 27%">设备间</span>
+              <span style="--x: 70%; --y: 46%">安全出口</span>
+              <span style="--x: 14%; --y: 68%">工作区</span>
+              <span style="--x: 45%; --y: 77%">承重墙</span>
+            </div>
+
+            <div class="drawing-translated" aria-hidden="true">
+              <div class="drawing-copy">
+                <span style="--x: 15%; --y: 27%">MEETING ROOM</span>
+                <span style="--x: 46%; --y: 27%">EQUIPMENT</span>
+                <span style="--x: 70%; --y: 46%">EMERGENCY EXIT</span>
+                <span style="--x: 14%; --y: 68%">WORK AREA</span>
+                <span style="--x: 45%; --y: 77%">LOAD-BEARING WALL</span>
+              </div>
+            </div>
+
+            <div class="compare-line" aria-hidden="true">
+              <span class="compare-handle">↔</span>
+            </div>
+            <input
+              class="compare-range"
+              type="range"
+              min="12"
+              max="88"
+              value="55"
+              aria-label="拖动比较图纸原文和译文"
+            />
+            <span class="drawing-label original-label">原文图层 · ZH</span>
+            <span class="drawing-label translated-label">译文图层 · EN</span>
+          </div>
+
+          <div class="drawing-foot">
+            <span><i></i> ENTITY TEXT PRESERVED</span>
+            <span>LAYER: TRANSLATION_EN</span>
+          </div>
+        </div>
+
+        <a class="scroll-cue" href="#workflow" aria-label="向下浏览">
+          <span>SCROLL TO PROCESS</span><i></i>
+        </a>
+      </section>
+
+      <section class="process-section section" id="workflow">
+        <div class="section-heading" data-reveal>
+          <div>
+            <span class="kicker">PIPELINE / 处理流水线</span>
+            <h2>不是截图翻译，<br />是图纸结构内的语言替换。</h2>
+          </div>
+          <p>
+            系统直接处理 CAD 文字实体。每个阶段都有明确产物，既能一键贯通，也能通过 Excel 或 CLI 分步检查、修订与恢复。
+          </p>
+        </div>
+
+        <ol class="process-track" data-reveal>
+          <li>
+            <span class="step-no">01</span>
+            <div class="step-icon icon-convert" aria-hidden="true"><i></i><i></i></div>
+            <h3>转换</h3>
+            <p>将 DWG 规范化为可处理的 DXF；支持厂商 CAD COM、ODA、LibreDWG 等后端。</p>
+            <code>DWG → DXF</code>
+          </li>
+          <li>
+            <span class="step-no">02</span>
+            <div class="step-icon icon-extract" aria-hidden="true"><i></i><i></i><i></i></div>
+            <h3>提取</h3>
+            <p>识别 TEXT / MTEXT 实体，导出可审核的 Excel，同时记录实体定位信息。</p>
+            <code>DXF → XLSX</code>
+          </li>
+          <li>
+            <span class="step-no">03</span>
+            <div class="step-icon icon-translate" aria-hidden="true"><b>文</b><b>A</b></div>
+            <h3>翻译</h3>
+            <p>通过 LLM 批量翻译，结合术语表、缓存、智能过滤与失败重试控制质量和成本。</p>
+            <code>ZH → TARGET</code>
+          </li>
+          <li>
+            <span class="step-no">04</span>
+            <div class="step-icon icon-apply" aria-hidden="true"><i></i><i></i></div>
+            <h3>回填</h3>
+            <p>按实体地址写回译文，可选择替换、追加或换行模式，生成新的 DXF 文件。</p>
+            <code>XLSX → DXF</code>
+          </li>
+        </ol>
+      </section>
+
+      <section class="capabilities section" id="capabilities">
+        <div class="section-heading compact" data-reveal>
+          <div>
+            <span class="kicker">CAPABILITY MATRIX / 核心能力</span>
+            <h2>为真实工程任务而设计。</h2>
+          </div>
+          <p>从格式兼容、模型接入到任务恢复，围绕批量图纸交付中的实际摩擦点逐项解决。</p>
+        </div>
+
+        <div class="capability-grid">
+          <article class="capability-card card-wide entity-card" data-reveal>
+            <div class="card-index">TEXT / MTEXT</div>
+            <div class="entity-visual" aria-hidden="true">
+              <span class="entity-box"><i></i><i></i><i></i><i></i><b>消防控制室</b></span>
+              <span class="entity-meta">TYPE: MTEXT<br />HANDLE: 18F2<br />LAYER: A-TEXT</span>
+            </div>
+            <div>
+              <h3>按实体提取与回填</h3>
+              <p>译文回到对应 CAD 文字实体，而不是贴在图片上。图纸保持可编辑，后续校对和出图流程不被打断。</p>
+            </div>
+          </article>
+
+          <article class="capability-card provider-card" data-reveal>
+            <div class="card-index">LLM GATEWAY</div>
+            <div class="provider-orbit" aria-hidden="true">
+              <span>OPENAI</span><span>DEEPSEEK</span><span>QWEN</span><span>KIMI</span>
+              <b>10+</b>
+            </div>
+            <h3>多模型统一接入</h3>
+            <p>内置主流厂商预设与 OpenAI-compatible 自定义端点，支持有序备用模型。</p>
+          </article>
+
+          <article class="capability-card terminology-card" data-reveal>
+            <div class="card-index">CONSISTENCY</div>
+            <div class="term-list" aria-hidden="true">
+              <span><i>承重墙</i><b>LOAD-BEARING WALL</b></span>
+              <span><i>配电箱</i><b>DISTRIBUTION BOX</b></span>
+              <span><i>标高</i><b>ELEVATION</b></span>
+            </div>
+            <h3>术语一致，成本可控</h3>
+            <p>CSV/XLSX 术语表、翻译缓存、纯符号过滤与 RPM/TPM 限速共同参与处理。</p>
+          </article>
+
+          <article class="capability-card card-wide runtime-card" data-reveal>
+            <div class="card-index">ONE CORE · THREE INTERFACES</div>
+            <div class="runtime-tabs" role="tablist" aria-label="运行形态展示">
+              <button class="is-active" type="button" data-runtime="web" role="tab" aria-selected="true">WEB</button>
+              <button type="button" data-runtime="cli" role="tab" aria-selected="false">CLI</button>
+              <button type="button" data-runtime="exe" role="tab" aria-selected="false">EXE</button>
+            </div>
+            <div class="runtime-terminal" data-runtime-panel>
+              <div><i></i><i></i><i></i><span>CAD TRANSLATION WORKBENCH</span></div>
+              <pre><code>拖入 drawing.dwg
+目标语言  Russian
+回填模式  Replace
+状态      Ready to process_</code></pre>
+            </div>
+            <div>
+              <h3>一套核心，多种入口</h3>
+              <p>React 工作台适合日常操作，<code>cad-translate</code> CLI 便于自动化，交付包与独立 EXE 面向 Windows 落地。</p>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section class="compatibility section">
+        <div class="compatibility-title" data-reveal>
+          <span class="kicker">SYSTEM PROFILE / 兼容矩阵</span>
+          <h2>接入已有工具链，<br />不改变工程师的工作习惯。</h2>
+        </div>
+        <div class="matrix" data-reveal>
+          <div class="matrix-row"><span>01 / 输入</span><b>DWG</b><b>DXF</b><b>XLSX</b><b>CSV</b></div>
+          <div class="matrix-row"><span>02 / CAD 后端</span><b>AutoCAD</b><b>浩辰 CAD</b><b>中望 CAD</b><b>ODA</b><b>LibreDWG</b></div>
+          <div class="matrix-row"><span>03 / 翻译接口</span><b>OpenAI</b><b>DeepSeek</b><b>Qwen</b><b>Kimi</b><b>Custom</b></div>
+          <div class="matrix-row"><span>04 / 输出</span><b>DXF</b><b>XLSX</b><b>任务日志</b><b>JSON</b></div>
+        </div>
+      </section>
+
+      <section class="deploy-section section" id="deploy">
+        <div class="deploy-grid">
+          <div class="deploy-copy" data-reveal>
+            <span class="kicker">LOCAL FIRST / 本地部署</span>
+            <h2>让图纸留在<br />自己的 Windows 主机。</h2>
+            <p>
+              Web 前端、FastAPI 后端与 CAD 转换器运行在本机或内网。选择你自己的模型服务商，并通过管理令牌保护敏感接口。
+            </p>
+            <ul>
+              <li><span>01</span> Windows 10 / 11</li>
+              <li><span>02</span> Python 3.10+</li>
+              <li><span>03</span> Node.js 18+（仅源码开发）</li>
+              <li><span>04</span> CAD 软件可选，DXF 可直接处理</li>
+            </ul>
+          </div>
+
+          <div class="install-panel" data-reveal>
+            <div class="install-head">
+              <span>POWERSHELL · QUICK START</span>
+              <button class="copy-button" type="button" data-copy-target="install-code">复制命令</button>
+            </div>
+            <pre id="install-code"><code><span class="prompt">PS&gt;</span> git clone https://github.com/reknottycat/cad-translation-web.git
+<span class="prompt">PS&gt;</span> cd cad-translation-web
+<span class="prompt">PS&gt;</span> python -m pip install -r backend\requirements.txt
+<span class="prompt">PS&gt;</span> python -m pip install -e agent-harness
+<span class="prompt">PS&gt;</span> cad-translate doctor
+
+<span class="comment"># 启动 Web 服务</span>
+<span class="prompt">PS&gt;</span> cd backend
+<span class="prompt">PS&gt;</span> python run_server.py</code></pre>
+            <div class="install-status">
+              <span><i></i> SOURCE AVAILABLE</span>
+              <a
+                href="https://github.com/reknottycat/cad-translation-web#quick-start"
+                target="_blank"
+                rel="noreferrer"
+              >完整安装文档 ↗</a>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="final-cta section">
+        <div class="cta-blueprint" aria-hidden="true"></div>
+        <div data-reveal>
+          <span class="kicker">READY FOR TRANSLATION</span>
+          <h2>下一张图纸，<br /><em>换一种语言交付。</em></h2>
+          <p>开源、可审查、可本地部署。把重复的文字搬运交给流水线。</p>
+          <div class="hero-actions">
+            <a
+              class="button button-primary"
+              href="https://github.com/reknottycat/cad-translation-web"
+              target="_blank"
+              rel="noreferrer"
+            >
+              <span>在 GitHub 查看源码</span><span aria-hidden="true">↗</span>
+            </a>
+            <a
+              class="button button-ghost light"
+              href="https://cnb.cool/star_fu/cad-translation-web"
+              target="_blank"
+              rel="noreferrer"
+            >国内镜像</a>
+          </div>
+        </div>
+        <div class="cta-stamp" aria-hidden="true">
+          <span>DWG</span><i>→</i><span>DXF</span><i>→</i><span>世界</span>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="brand footer-brand">
+        <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
+          <path d="M4.5 9.5h31v21h-31z" />
+          <path d="M12 30.5v5M28 30.5v5M8 35.5h24M13 15h14M13 20h9M13 25h12" />
+          <circle cx="29" cy="12" r="2.5" />
+        </svg>
+        <span><b>CAD Translation</b><small>ENGINEERING LANGUAGE LAYER</small></span>
+      </div>
+      <p>MIT License · Built for engineering drawings.</p>
+      <div>
+        <a href="https://github.com/reknottycat/cad-translation-web" target="_blank" rel="noreferrer">GitHub</a>
+        <a href="https://github.com/reknottycat/cad-translation-web/tree/main/docs/modern" target="_blank" rel="noreferrer">Docs</a>
+        <span>© <span data-year>2026</span></span>
+      </div>
+    </footer>
+
+    <script src="./script.js"></script>
+  </body>
+</html>

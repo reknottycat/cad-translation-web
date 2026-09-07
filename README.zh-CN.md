@@ -24,6 +24,10 @@
 本仓库包含 Web 应用（FastAPI 后端 + React 前端）以及持续维护的
 `cad-translate` CLI。
 
+项目宣传站：[reknottycat.github.io/cad-translation-web](https://reknottycat.github.io/cad-translation-web/)。
+无依赖静态源码位于 [`website/`](website/)，由
+[GitHub Pages 工作流](.github/workflows/deploy-pages.yml) 自动发布。
+
 ## 核心功能
 
 - **多格式支持**：DWG、DXF、XLSX、CSV 输入输出
